@@ -1,0 +1,129 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Variant'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - 'debug'
+          - 'release'
+          - 'both'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Package APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: Prepare environment files
+        run: |
+          # Prepare .env from .env.example if .env does not exist
+          if [ ! -f ".env" ]; then
+            cp .env.example .env
+            echo ".env created from .env.example"
+          fi
+          
+          # Restore debug keystore from tracked base64 file
+          if [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+            echo "debug.keystore successfully restored."
+          fi
+
+      - name: Run Unit Tests
+        run: ./gradlew testDebugUnitTest --continue
+
+      - name: Build Debug APK
+        if: ${{ github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both' || github.event.inputs.build_type == '' || github.event_name == 'push' || github.event_name == 'pull_request' }}
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Prepare Release Signing (if secrets configured)
+        id: release_keystore
+        run: |
+          if [ -n "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > "${{ github.workspace }}/release-upload-key.jks"
+            echo "has_keystore=true" >> $GITHUB_OUTPUT
+            echo "Release keystore decoded."
+          else
+            echo "has_keystore=false" >> $GITHUB_OUTPUT
+            echo "No RELEASE_KEYSTORE_BASE64 secret provided."
+          fi
+
+      - name: Build Release APK
+        if: ${{ github.event.inputs.build_type == 'release' || github.event.inputs.build_type == 'both' || steps.release_keystore.outputs.has_keystore == 'true' }}
+        env:
+          KEYSTORE_PATH: "${{ github.workspace }}/release-upload-key.jks"
+          STORE_PASSWORD: "${{ secrets.RELEASE_KEYSTORE_PASSWORD }}"
+          KEY_PASSWORD: "${{ secrets.RELEASE_KEY_PASSWORD }}"
+        run: |
+          if [ "${{ steps.release_keystore.outputs.has_keystore }}" = "true" ]; then
+            ./gradlew assembleRelease --stacktrace
+          else
+            echo "Building unsigned/default release or skipping..."
+            ./gradlew assembleRelease --stacktrace || echo "Release build requires keystore configuration."
+          fi
+
+      - name: Organize APK Artifacts
+        run: |
+          mkdir -p build-apks
+          # Copy debug APK if exists
+          if [ -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
+            cp app/build/outputs/apk/debug/app-debug.apk build-apks/SitrakS7H-debug.apk
+            echo "Debug APK copied."
+          fi
+          # Copy release APK if exists
+          if [ -f "app/build/outputs/apk/release/app-release.apk" ]; then
+            cp app/build/outputs/apk/release/app-release.apk build-apks/SitrakS7H-release.apk
+            echo "Release APK copied."
+          elif [ -f "app/build/outputs/apk/release/app-release-unsigned.apk" ]; then
+            cp app/build/outputs/apk/release/app-release-unsigned.apk build-apks/SitrakS7H-release-unsigned.apk
+            echo "Unsigned Release APK copied."
+          fi
+          ls -la build-apks/
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sitrak-s7h-apk
+          path: build-apks/*.apk
+          retention-days: 14
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build-apks/*.apk
+          draft: false
+          prerelease: false
+          generate_release_notes: true

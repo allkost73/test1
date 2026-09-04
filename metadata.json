@@ -1,0 +1,6 @@
+{
+  "name": "Sitrak S7H",
+  "description": "Диагностика и настройка китайских грузовиков Sitrak C7H / S7H через адаптер ELM327 Bluetooth Classic",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

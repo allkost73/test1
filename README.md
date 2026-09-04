@@ -1,11 +1,63 @@
-<div align="center">
+# Sitrak S7H Diagnostic & Tuning (ELM327 Bluetooth Classic)
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Приложение для диагностики, мониторинга телеметрии и настройки параметров китайских грузовых автомобилей **Sitrak C7H / S7H** (двигатели MC11 / MC13, ЭБУ Bosch EDC17CV44) через диагностический адаптер **ELM327 Bluetooth Classic** (SPP / J1939 CAN 250/500 kbps).
 
-  <h1>Built with AI Studio</h2>
+---
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+## 🚀 Автоматическая сборка APK через GitHub Actions
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+В репозитории настроен автоматический CI/CD пайплайн в файле `.github/workflows/build-apk.yml`.
 
-</div>
+### 1. Как запускается сборка APK:
+- **Автоматически:** при каждом `push` или `pull request` в ветку `main` или `master`.
+- **Вручную (Workflow Dispatch):**
+  1. Перейдите во вкладку **Actions** в вашем репозитории на GitHub.
+  2. Выберите workflow **"Build Android APK"** в левой панели.
+  3. Нажмите кнопку **"Run workflow"**.
+  4. Выберите вариант сборки (`debug`, `release` или `both`) и нажмите зелёную кнопку запуска.
+- **При создании релиза:** при создании тега версии (например, `v1.0.0`) APK автоматически прикрепится к GitHub Release.
+
+### 2. Как скачать готовый APK файл:
+1. Откройте вкладку **Actions** в репозитории на GitHub.
+2. Кликните на завершённый запуск workflow (зелёная галочка).
+3. Внизу страницы в блоке **Artifacts** нажмите на **`sitrak-s7h-apk`** — скачается архив с готовым `.apk` файлом:
+   - `SitrakS7H-debug.apk` (готов к установке на любое Android-устройство без доп. подписи).
+
+### 3. (Опционально) Настройка Release-подписи для Google Play / Продакшн:
+Если вам требуется подписывать Release APK собственным ключом:
+1. Закодируйте ваш `.jks` файл в base64:
+   ```bash
+   base64 -w 0 my-release-key.jks > key.txt
+   ```
+2. В GitHub перейдите в **Settings** → **Secrets and variables** → **Actions** → **New repository secret**.
+3. Добавьте секреты:
+   - `RELEASE_KEYSTORE_BASE64`: содержимое файла `key.txt`
+   - `RELEASE_KEYSTORE_PASSWORD`: пароль к хранилищу ключей
+   - `RELEASE_KEY_PASSWORD`: пароль к ключу
+
+---
+
+## 🛠 Локальная сборка проекта
+
+Если вам нужно собрать APK на компьютере через терминал:
+
+```bash
+# Для Linux / macOS:
+chmod +x ./gradlew
+./gradlew assembleDebug
+
+# Для Windows:
+gradlew.bat assembleDebug
+```
+Собранный файл будет находиться по пути:
+`app/build/outputs/apk/debug/app-debug.apk`
+
+---
+
+## 📱 Функционал приложения Sitrak S7H:
+- **Панель приборов (Dashboard):** Обороты (RPM), скорость, температура ОЖ, давление масла, уровень AdBlue (мочевины), температура выхлопа EGT, наддув турбины (Boost).
+- **Коды неисправностей (DTC):** Чтение активных и сохранённых ошибок по протоколу SAE J1939 (SPN/FMI), расшифровка на русском языке и сброс ошибок ЭБУ.
+- **Параметры и графики:** Потоковые данные датчиков в реальном времени с графиками динамики.
+- **Калибровка и тесты (Tuning):** Регулировка ограничителя максимальной скорости, настройка холостого хода, принудительный прожиг сажевого фильтра (DPF Regen), тест компрессии и балансировки цилиндров.
+- **ELM327 Терминал:** Прямой ввод AT/ST команд и шестнадцатеричных J1939 запросов.
+- **История и отчёты:** Сохранение диагностических карт и отчётов в PDF/текст.
