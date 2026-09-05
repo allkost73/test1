@@ -3,25 +3,28 @@ package com.example.bluetooth
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import com.example.model.BluetoothDeviceInfo
 import com.example.model.ElmConnectionState
+import com.example.model.ElmProtocol
 import com.example.model.LiveTelemetry
 import com.example.model.TerminalLogItem
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.text.SimpleDateFormat
@@ -39,6 +42,11 @@ class Elm327Manager(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.IO + Job())
 
+    private val bluetoothManager: BluetoothManager? =
+        context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+    private val bluetoothAdapter: BluetoothAdapter?
+        get() = bluetoothManager?.adapter ?: BluetoothAdapter.getDefaultAdapter()
+
     private val _connectionState = MutableStateFlow<ElmConnectionState>(ElmConnectionState.Disconnected)
     val connectionState: StateFlow<ElmConnectionState> = _connectionState.asStateFlow()
 
@@ -51,31 +59,121 @@ class Elm327Manager(private val context: Context) {
     private val _isSimulationMode = MutableStateFlow(true)
     val isSimulationMode: StateFlow<Boolean> = _isSimulationMode.asStateFlow()
 
+    private val _selectedProtocol = MutableStateFlow(ElmProtocol.AUTO)
+    val selectedProtocol: StateFlow<ElmProtocol> = _selectedProtocol.asStateFlow()
+
+    private val _discoveredDevices = MutableStateFlow<List<BluetoothDeviceInfo>>(emptyList())
+    val discoveredDevices: StateFlow<List<BluetoothDeviceInfo>> = _discoveredDevices.asStateFlow()
+
+    private val _isDiscovering = MutableStateFlow(false)
+    val isDiscovering: StateFlow<Boolean> = _isDiscovering.asStateFlow()
+
     private var bluetoothSocket: BluetoothSocket? = null
     private var inputStream: InputStream? = null
     private var outputStream: OutputStream? = null
     private var pollingJob: Job? = null
     private var simJob: Job? = null
+    private var receiverRegistered = false
+
+    private val discoveryReceiver = object : BroadcastReceiver() {
+        @SuppressLint("MissingPermission")
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                BluetoothDevice.ACTION_FOUND -> {
+                    val device: BluetoothDevice? =
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    device?.let { dev ->
+                        val devName = dev.name ?: "Неизвестное устройство"
+                        val devAddress = dev.address ?: ""
+                        if (devAddress.isNotEmpty()) {
+                            val currentList = _discoveredDevices.value
+                            if (currentList.none { it.address == devAddress }) {
+                                val isPaired = dev.bondState == BluetoothDevice.BOND_BONDED
+                                _discoveredDevices.value = currentList + BluetoothDeviceInfo(
+                                    name = devName,
+                                    address = devAddress,
+                                    isPaired = isPaired
+                                )
+                            }
+                        }
+                    }
+                }
+                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
+                    _isDiscovering.value = false
+                }
+            }
+        }
+    }
 
     init {
         // Start simulation by default so user can immediately test and explore
         startSimulationEngine()
     }
 
+    fun isBluetoothAvailable(): Boolean = bluetoothAdapter != null
+
+    fun isBluetoothEnabled(): Boolean = bluetoothAdapter?.isEnabled == true
+
+    fun setProtocol(protocol: ElmProtocol) {
+        _selectedProtocol.value = protocol
+    }
+
     @SuppressLint("MissingPermission")
     fun getPairedDevices(): List<BluetoothDeviceInfo> {
-        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return emptyList()
+        val adapter = bluetoothAdapter ?: return emptyList()
+        if (!adapter.isEnabled) return emptyList()
+
         return try {
             adapter.bondedDevices?.map { device ->
                 BluetoothDeviceInfo(
-                    name = device.name ?: "Неизвестное устройство",
+                    name = device.name ?: "Неизвестный сканер",
                     address = device.address,
-                    isPaired = true
+                    isPaired = true,
+                    isConnected = bluetoothSocket?.isConnected == true &&
+                            bluetoothSocket?.remoteDevice?.address == device.address
                 )
             } ?: emptyList()
         } catch (e: Exception) {
             emptyList()
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun startDiscovery() {
+        val adapter = bluetoothAdapter ?: return
+        if (!adapter.isEnabled) return
+
+        try {
+            if (!receiverRegistered) {
+                val filter = IntentFilter().apply {
+                    addAction(BluetoothDevice.ACTION_FOUND)
+                    addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+                }
+                context.registerReceiver(discoveryReceiver, filter)
+                receiverRegistered = true
+            }
+
+            if (adapter.isDiscovering) {
+                adapter.cancelDiscovery()
+            }
+
+            _discoveredDevices.value = emptyList()
+            _isDiscovering.value = true
+            adapter.startDiscovery()
+        } catch (e: Exception) {
+            _isDiscovering.value = false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun stopDiscovery() {
+        val adapter = bluetoothAdapter ?: return
+        try {
+            if (adapter.isDiscovering) {
+                adapter.cancelDiscovery()
+            }
+        } catch (_: Exception) {}
+        _isDiscovering.value = false
     }
 
     fun setSimulationMode(enabled: Boolean) {
@@ -94,56 +192,144 @@ class Elm327Manager(private val context: Context) {
             try {
                 simJob?.cancel()
                 _isSimulationMode.value = false
-                _connectionState.value = ElmConnectionState.Connecting("Подключение к $deviceName...")
 
-                val adapter = BluetoothAdapter.getDefaultAdapter()
-                    ?: throw IllegalStateException("Bluetooth адаптер недоступен")
+                val adapter = bluetoothAdapter
+                    ?: throw IllegalStateException("Bluetooth не поддерживается на этом устройстве")
+
+                if (!adapter.isEnabled) {
+                    throw IllegalStateException("Bluetooth выключен. Пожалуйста, включите Bluetooth на телефоне.")
+                }
+
+                _connectionState.value = ElmConnectionState.Connecting("Остановка поиска и подготовка...")
+                @SuppressLint("MissingPermission")
+                if (adapter.isDiscovering) {
+                    adapter.cancelDiscovery()
+                }
 
                 @SuppressLint("MissingPermission")
                 val device: BluetoothDevice = adapter.getRemoteDevice(deviceAddress)
 
-                _connectionState.value = ElmConnectionState.Connecting("Создание SPP сокета...")
-                @SuppressLint("MissingPermission")
-                val socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+                // Try 4-tier connection fallback (Secure SPP -> Insecure SPP -> Channel 1 -> Insecure Channel 1)
+                val socket = establishSocketWithFallbacks(device, deviceName)
                 bluetoothSocket = socket
-
-                withContext(Dispatchers.IO) {
-                    socket.connect()
-                }
 
                 inputStream = socket.inputStream
                 outputStream = socket.outputStream
 
                 // Initialize ELM327 protocol
-                _connectionState.value = ElmConnectionState.Connecting("Инициализация ELM327 (ATZ)...")
-                val initZ = sendRawCommandInternal("ATZ")
-                delay(300)
+                _connectionState.value = ElmConnectionState.Connecting("Инициализация чипа ELM327 (ATZ)...")
+                delay(200)
 
-                _connectionState.value = ElmConnectionState.Connecting("Настройка протокола CAN (ISO 15765-4)...")
+                var initZ = sendRawCommandInternal("ATZ")
+                if (initZ == "NO DATA" || initZ.isEmpty()) {
+                    delay(300)
+                    initZ = sendRawCommandInternal("ATZ")
+                }
+
+                _connectionState.value = ElmConnectionState.Connecting("Настройка параметров ELM (Echo/Linefeed/Spaces)...")
                 sendRawCommandInternal("ATE0") // Echo Off
                 sendRawCommandInternal("ATL0") // Linefeeds Off
                 sendRawCommandInternal("ATS0") // Spaces Off
-                sendRawCommandInternal("ATH1") // Headers On
-                sendRawCommandInternal("ATSP6") // ISO 15765-4 CAN 11/500 (Sitrak EDC17 OBD2)
+                sendRawCommandInternal("ATAT1") // Adaptive Timing
 
-                val voltageResp = sendRawCommandInternal("ATRV") // Check 24V bus
-                val protocolResp = sendRawCommandInternal("ATDP") // Display protocol
+                val proto = _selectedProtocol.value
+                _connectionState.value = ElmConnectionState.Connecting("Установка протокола CAN (${proto.displayName})...")
+                sendRawCommandInternal(proto.atCommand)
+
+                _connectionState.value = ElmConnectionState.Connecting("Проверка напряжения бортовой сети 24V (ATRV)...")
+                val voltageResp = sendRawCommandInternal("ATRV")
+                val volt = parseVoltage(voltageResp)
+                if (volt > 0) {
+                    _telemetry.value = _telemetry.value.copy(batteryVoltage = volt)
+                }
+
+                val protocolResp = sendRawCommandInternal("ATDP")
+                val displayProtocol = if (protocolResp.isNotBlank() && protocolResp != "NO DATA") {
+                    protocolResp
+                } else {
+                    proto.displayName
+                }
 
                 _connectionState.value = ElmConnectionState.Connected(
                     deviceName = deviceName,
-                    protocol = if (protocolResp.isNotBlank()) protocolResp else "ISO 15765-4 CAN (Sitrak)",
+                    protocol = displayProtocol,
                     isSimulation = false
                 )
 
-                logTerminal("INIT", "ELM327 инициализирован: $initZ, Напряжение: $voltageResp", true)
+                logTerminal("INIT", "ELM327 сопряжен: $initZ | Сеть: $voltageResp | Протокол: $displayProtocol", true)
                 startPhysicalPolling()
 
             } catch (e: Exception) {
                 disconnectPhysical()
-                _connectionState.value = ElmConnectionState.Error("Ошибка подключения: ${e.localizedMessage ?: "Сбой соединения"}. Запустите симулятор для проверки.")
-                logTerminal("CONNECT", "Сбой: ${e.message}", false)
+                val userFriendlyMessage = when {
+                    e.message?.contains("Bluetooth выключен", ignoreCase = true) == true ->
+                        "Bluetooth выключен на телефоне. Включите Bluetooth."
+                    e.message?.contains("permission", ignoreCase = true) == true ->
+                        "Отсутствуют разрешения Bluetooth. Предоставьте доступ в настройках приложения."
+                    else ->
+                        "Сбой подключения к $deviceName: ${e.localizedMessage ?: "Таймаут сокета"}. Убедитесь, что зажигание Sitrak включено (24V) и сканер не занят другим приложением."
+                }
+                _connectionState.value = ElmConnectionState.Error(userFriendlyMessage)
+                logTerminal("CONNECT", "Ошибка: ${e.message}", false)
             }
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun establishSocketWithFallbacks(device: BluetoothDevice, deviceName: String): BluetoothSocket {
+        val errorLogs = mutableListOf<String>()
+
+        // Fallback 1: Standard Secure RFCOMM (SPP UUID)
+        try {
+            _connectionState.value = ElmConnectionState.Connecting("Подключение (Метод 1: Secure SPP)...")
+            val s = device.createRfcommSocketToServiceRecord(SPP_UUID)
+            withContext(Dispatchers.IO) {
+                s.connect()
+            }
+            if (s.isConnected) return s
+        } catch (e1: Exception) {
+            errorLogs.add("Secure SPP: ${e1.message}")
+        }
+
+        // Fallback 2: Insecure RFCOMM (SPP UUID) - very common on newer Android versions with OBD2
+        try {
+            _connectionState.value = ElmConnectionState.Connecting("Подключение (Метод 2: Insecure SPP)...")
+            val s = device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+            withContext(Dispatchers.IO) {
+                s.connect()
+            }
+            if (s.isConnected) return s
+        } catch (e2: Exception) {
+            errorLogs.add("Insecure SPP: ${e2.message}")
+        }
+
+        // Fallback 3: Reflection createRfcommSocket on Channel 1 (Standard for ELM327 clones)
+        try {
+            _connectionState.value = ElmConnectionState.Connecting("Подключение (Метод 3: RFCOMM канал 1)...")
+            val method = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+            val s = method.invoke(device, 1) as BluetoothSocket
+            withContext(Dispatchers.IO) {
+                s.connect()
+            }
+            if (s.isConnected) return s
+        } catch (e3: Exception) {
+            errorLogs.add("Channel 1: ${e3.message}")
+        }
+
+        // Fallback 4: Reflection createInsecureRfcommSocket on Channel 1
+        try {
+            _connectionState.value = ElmConnectionState.Connecting("Подключение (Метод 4: Insecure RFCOMM канал 1)...")
+            val method = device.javaClass.getMethod("createInsecureRfcommSocket", Int::class.javaPrimitiveType)
+            val s = method.invoke(device, 1) as BluetoothSocket
+            withContext(Dispatchers.IO) {
+                s.connect()
+            }
+            if (s.isConnected) return s
+        } catch (e4: Exception) {
+            errorLogs.add("Insecure Channel 1: ${e4.message}")
+        }
+
+        throw IOException("Не удалось открыть сокет: " + errorLogs.joinToString(" | "))
     }
 
     private fun startPhysicalPolling() {
@@ -185,9 +371,9 @@ class Elm327Manager(private val context: Context) {
                         batteryVoltage = if (volt > 0) volt else current.batteryVoltage
                     )
 
-                    delay(250)
+                    delay(300)
                 } catch (e: Exception) {
-                    delay(1000)
+                    delay(1500)
                 }
             }
         }
@@ -203,30 +389,13 @@ class Elm327Manager(private val context: Context) {
         )
 
         simJob = scope.launch {
-            var tick = 0
-            var simSpeed = 0f
-            var driveSimActive = false
-
             while (isActive) {
-                tick++
-                val baseRpm = _telemetry.value.rpm
-                // Small realistic engine vibration / flutter on Common Rail
                 val rpmFlutter = (Random.nextFloat() - 0.5f) * 18f
                 val targetRpm = (620f + rpmFlutter).coerceIn(580f, 750f)
-
-                // Battery 24V alternator charge fluctuation
                 val voltFlutter = 27.6f + (Random.nextFloat() - 0.5f) * 0.4f
-
-                // Common rail pressure idle ~500-550 bar
                 val railFlutter = 520f + (Random.nextFloat() - 0.5f) * 25f
-
-                // Boost pressure at idle ~1.02 - 1.06 bar
                 val boostFlutter = 1.04f + (Random.nextFloat() - 0.5f) * 0.04f
-
-                // Oil pressure ~3.7 - 3.9 bar
                 val oilFlutter = 3.8f + (Random.nextFloat() - 0.5f) * 0.15f
-
-                // Brake air tanks ~8.3 - 8.5 bar
                 val air1 = 8.4f + (Random.nextFloat() - 0.5f) * 0.1f
                 val air2 = 8.2f + (Random.nextFloat() - 0.5f) * 0.1f
 
@@ -247,10 +416,9 @@ class Elm327Manager(private val context: Context) {
 
     suspend fun sendCommand(command: String): String {
         val cleanCmd = command.trim()
-        val timeStr = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
 
         if (_isSimulationMode.value) {
-            delay(120) // Realistic ELM response latency
+            delay(100)
             val response = simulateCommandResponse(cleanCmd)
             logTerminal(cleanCmd, response, !response.contains("ERROR"))
             return response
@@ -268,10 +436,10 @@ class Elm327Manager(private val context: Context) {
     }
 
     private suspend fun sendRawCommandInternal(command: String): String = withContext(Dispatchers.IO) {
-        val out = outputStream ?: throw IllegalStateException("Нет подключения к сокету")
-        val input = inputStream ?: throw IllegalStateException("Поток ввода недоступен")
+        val out = outputStream ?: throw IllegalStateException("Нет подключения к Bluetooth-сокету")
+        val input = inputStream ?: throw IllegalStateException("Поток ввода Bluetooth недоступен")
 
-        // Clear input buffer
+        // Flush any stale bytes
         while (input.available() > 0) {
             input.read()
         }
@@ -281,40 +449,48 @@ class Elm327Manager(private val context: Context) {
         out.flush()
 
         val sb = StringBuilder()
+        val buffer = ByteArray(256)
         val startTime = System.currentTimeMillis()
         val timeout = 2500L
 
         while (System.currentTimeMillis() - startTime < timeout) {
             if (input.available() > 0) {
-                val b = input.read()
-                if (b == -1) break
-                val c = b.toChar()
-                if (c == '>') { // ELM327 prompt prompt ends response
-                    break
+                val count = input.read(buffer)
+                if (count > 0) {
+                    val text = String(buffer, 0, count, Charsets.US_ASCII)
+                    sb.append(text)
+                    if (text.contains(">")) {
+                        break
+                    }
                 }
-                sb.append(c)
             } else {
-                Thread.sleep(15)
+                delay(20)
             }
         }
 
-        val result = sb.toString().replace("\r", " ").replace("\n", " ").trim()
+        val result = sb.toString()
+            .replace(">", "")
+            .replace("\r", " ")
+            .replace("\n", " ")
+            .trim()
+
         if (result.isEmpty()) "NO DATA" else result
     }
 
     private fun simulateCommandResponse(cmd: String): String {
         val upper = cmd.uppercase(Locale.ROOT)
         return when {
-            upper == "ATZ" -> "ELM327 v2.1 (SITRAK CAN)"
+            upper == "ATZ" -> "ELM327 v1.5 (SITRAK J1939)"
             upper == "ATRV" -> String.format(Locale.US, "%.1fV", _telemetry.value.batteryVoltage)
             upper.startsWith("ATE") -> "OK"
             upper.startsWith("ATL") -> "OK"
             upper.startsWith("ATS") -> "OK"
             upper.startsWith("ATH") -> "OK"
+            upper.startsWith("ATAT") -> "OK"
             upper.startsWith("ATSP") -> "OK"
-            upper == "ATDP" -> "ISO 15765-4 (CAN 29/250 SAE J1939)"
+            upper == "ATDP" -> "SAE J1939 CAN (29 bit / 250 kbps)"
             upper.startsWith("ATSH") -> "OK"
-            upper == "0100" -> "41 00 BE 3F B8 13" // Supported PIDs
+            upper == "0100" -> "41 00 BE 3F B8 13"
             upper == "010C" -> {
                 val raw = (_telemetry.value.rpm * 4).toInt()
                 val a = (raw shr 8) and 0xFF
@@ -330,12 +506,12 @@ class Elm327Manager(private val context: Context) {
                 val b = valKpa and 0xFF
                 String.format(Locale.US, "41 23 %02X %02X", a, b)
             }
-            upper == "03" -> "43 04 02 38 20 4F" // Active DTCs (P0238, P204F)
-            upper == "04" -> "44" // Clear DTC response
-            upper.startsWith("22") -> "62 11 A0 03 F8 12" // UDS ReadDataByIdentifier
-            upper.startsWith("2E") -> "6E" // UDS WriteDataByIdentifier Success
-            upper.startsWith("31") -> "71 01" // RoutineControl Success
-            else -> "41 00 OK"
+            upper == "03" -> "43 04 02 38 20 4F"
+            upper == "04" -> "44"
+            upper.startsWith("22") -> "62 11 A0 03 F8 12"
+            upper.startsWith("2E") -> "6E"
+            upper.startsWith("31") -> "71 01"
+            else -> "OK"
         }
     }
 
@@ -413,8 +589,9 @@ class Elm327Manager(private val context: Context) {
 
     private fun parseVoltage(response: String): Float {
         return try {
-            val num = response.replace("V", "").replace("v", "").trim()
-            num.toFloatOrNull() ?: 0f
+            val clean = response.replace("V", "").replace("v", "").trim()
+            val match = Regex("""\d+(\.\d+)?""").find(clean)
+            match?.value?.toFloatOrNull() ?: 0f
         } catch (e: Exception) { 0f }
     }
 }

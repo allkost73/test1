@@ -70,6 +70,20 @@ data class BluetoothDeviceInfo(
     val isConnected: Boolean = false
 )
 
+enum class ElmProtocol(
+    val code: String,
+    val atCommand: String,
+    val displayName: String,
+    val description: String
+) {
+    AUTO("AUTO", "ATSP0", "Автовыбор (Рекомендуется)", "Автоматический перебор протоколов ELM327"),
+    J1939_250K("J1939_250", "ATSPA", "SAE J1939 CAN (29 бит / 250k)", "Основной стандарт Sitrak S7H / C7H"),
+    J1939_500K("J1939_500", "ATSPB", "SAE J1939 CAN (29 бит / 500k)", "Высокоскоростная шина грузовиков"),
+    ISO_15765_11_500("ISO_11_500", "ATSP6", "ISO 15765-4 CAN (11 бит / 500k)", "Стандарт OBD-II / Bosch EDC17"),
+    ISO_15765_29_500("ISO_29_500", "ATSP7", "ISO 15765-4 CAN (29 бит / 500k)", "29-битная шина CAN 500k"),
+    ISO_15765_29_250("ISO_29_250", "ATSP9", "ISO 15765-4 CAN (29 бит / 250k)", "29-битная шина CAN 250k")
+}
+
 sealed class ElmConnectionState {
     data object Disconnected : ElmConnectionState()
     data class Connecting(val step: String) : ElmConnectionState()

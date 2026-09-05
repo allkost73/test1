@@ -107,13 +107,16 @@ fun SitrakMainScreen(
     val isScanning by viewModel.isScanning.collectAsState()
     val terminalLogs by viewModel.terminalLogs.collectAsState()
     val pairedDevices by viewModel.pairedDevices.collectAsState()
+    val discoveredDevices by viewModel.discoveredDevices.collectAsState()
+    val isDiscovering by viewModel.isDiscovering.collectAsState()
+    val selectedProtocol by viewModel.selectedProtocol.collectAsState()
     val isSimulationMode by viewModel.isSimulationMode.collectAsState()
     val savedReports by viewModel.savedReports.collectAsState()
     val statusNotice by viewModel.statusNotice.collectAsState()
     val rpmHistory by viewModel.rpmHistory.collectAsState()
     val boostHistory by viewModel.boostHistory.collectAsState()
 
-    // Bluetooth Permissions Launcher for Android 12+ (API 31+)
+    // Bluetooth Permissions Launcher for Android 12+ and Android <= 11
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -121,6 +124,7 @@ fun SitrakMainScreen(
     }
 
     LaunchedEffect(Unit) {
+        val permissionsToRequest = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val hasConnect = ContextCompat.checkSelfPermission(
                 context, Manifest.permission.BLUETOOTH_CONNECT
@@ -129,14 +133,17 @@ fun SitrakMainScreen(
                 context, Manifest.permission.BLUETOOTH_SCAN
             ) == PackageManager.PERMISSION_GRANTED
 
-            if (!hasConnect || !hasScan) {
-                permissionLauncher.launch(
-                    arrayOf(
-                        Manifest.permission.BLUETOOTH_CONNECT,
-                        Manifest.permission.BLUETOOTH_SCAN
-                    )
-                )
-            }
+            if (!hasConnect) permissionsToRequest.add(Manifest.permission.BLUETOOTH_CONNECT)
+            if (!hasScan) permissionsToRequest.add(Manifest.permission.BLUETOOTH_SCAN)
+        } else {
+            val hasFineLocation = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasFineLocation) permissionsToRequest.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
+        if (permissionsToRequest.isNotEmpty()) {
+            permissionLauncher.launch(permissionsToRequest.toTypedArray())
         }
     }
 
@@ -216,9 +223,16 @@ fun SitrakMainScreen(
                     connectionState = connectionState,
                     isSimulationMode = isSimulationMode,
                     pairedDevices = pairedDevices,
+                    discoveredDevices = discoveredDevices,
+                    isDiscovering = isDiscovering,
+                    selectedProtocol = selectedProtocol,
+                    isBluetoothEnabled = viewModel.isBluetoothEnabled(),
                     savedReports = savedReports,
                     onToggleSimulation = { viewModel.setSimulationMode(it) },
                     onRefreshDevices = { viewModel.refreshPairedDevices() },
+                    onStartDiscovery = { viewModel.startDiscovery() },
+                    onStopDiscovery = { viewModel.stopDiscovery() },
+                    onSelectProtocol = { viewModel.setProtocol(it) },
                     onConnectDevice = { viewModel.connectDevice(it) },
                     onDisconnect = { viewModel.disconnect() },
                     onSaveReport = { viewModel.saveCurrentReport() },

@@ -11,6 +11,7 @@ import com.example.model.BluetoothDeviceInfo
 import com.example.model.DiagnosticTab
 import com.example.model.DtcCode
 import com.example.model.ElmConnectionState
+import com.example.model.ElmProtocol
 import com.example.model.LiveTelemetry
 import com.example.model.TerminalLogItem
 import com.example.model.TruckConfiguration
@@ -37,6 +38,12 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     val telemetry: StateFlow<LiveTelemetry> = elmManager.telemetry
     val terminalLogs: StateFlow<List<TerminalLogItem>> = elmManager.terminalLogs
     val isSimulationMode: StateFlow<Boolean> = elmManager.isSimulationMode
+    val selectedProtocol: StateFlow<ElmProtocol> = elmManager.selectedProtocol
+    val discoveredDevices: StateFlow<List<BluetoothDeviceInfo>> = elmManager.discoveredDevices
+    val isDiscovering: StateFlow<Boolean> = elmManager.isDiscovering
+
+    fun isBluetoothAvailable(): Boolean = elmManager.isBluetoothAvailable()
+    fun isBluetoothEnabled(): Boolean = elmManager.isBluetoothEnabled()
 
     val savedReports: StateFlow<List<DiagnosticReportEntity>> = reportDao.getAllReports()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -106,6 +113,19 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
 
     fun refreshPairedDevices() {
         _pairedDevices.value = elmManager.getPairedDevices()
+    }
+
+    fun startDiscovery() {
+        elmManager.startDiscovery()
+    }
+
+    fun stopDiscovery() {
+        elmManager.stopDiscovery()
+    }
+
+    fun setProtocol(protocol: ElmProtocol) {
+        elmManager.setProtocol(protocol)
+        _statusNotice.value = "Выбран протокол: ${protocol.displayName}"
     }
 
     fun connectDevice(device: BluetoothDeviceInfo) {
