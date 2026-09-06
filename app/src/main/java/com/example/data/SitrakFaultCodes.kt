@@ -195,4 +195,101 @@ object SitrakFaultCodes {
             isActive = false
         )
     )
+
+    fun matchOrSynthesizeCode(codeStr: String, module: TruckModule): DtcCode {
+        val clean = codeStr.trim().uppercase(java.util.Locale.ROOT)
+        val found = allKnownSitrakCodes.firstOrNull {
+            it.obdCode.equals(clean, ignoreCase = true) ||
+            it.spnFmi.contains(clean, ignoreCase = true)
+        }
+        if (found != null) return found.copy(isActive = true)
+
+        val prefix = when {
+            clean.startsWith("P") || clean.startsWith("C") || clean.startsWith("B") || clean.startsWith("U") -> clean
+            else -> "P$clean"
+        }
+
+        return DtcCode(
+            id = "DTC_${System.currentTimeMillis()}_$clean",
+            spnFmi = "Код $prefix",
+            obdCode = prefix,
+            module = module,
+            title = "Код неисправности $prefix (${module.displayName})",
+            description = "Зафиксирован код ошибки в блоке ${module.displayName}. Считан по шине CAN Sitrak.",
+            probableCauses = listOf(
+                "Недостоверный сигнал датчика или исполнительного механизма",
+                "Обрыв или замыкание сигнальной цепи в жгуте проводки",
+                "Потеря согласования блоков по цифровой шине CAN J1939"
+            ),
+            severity = if (prefix.startsWith("P02") || prefix.startsWith("P00") || prefix.startsWith("P20")) DtcSeverity.CRITICAL else DtcSeverity.WARNING,
+            isActive = true
+        )
+    }
+
+    /**
+     * Parses standard OBD Mode 03, UDS 19 02 or J1939 responses into DtcCode list.
+     */
+    fun parseDtcResponse(raw: String, module: TruckModule): List<DtcCode> {
+        val clean = raw.replace(">", "").replace("\r", " ").replace("\n", " ").trim()
+        if (clean.isEmpty() || clean.contains("NO DATA") || clean.contains("ERROR") || clean == "43 00") {
+            return emptyList()
+        }
+
+        val results = mutableListOf<DtcCode>()
+        val hexTokens = clean.split(Regex("""\s+""")).filter { it.length == 2 && it.matches(Regex("[0-9A-Fa-f]{2}")) }
+
+        // Check if Mode 03 response (starts with 43)
+        val idx43 = hexTokens.indexOfFirst { it.equals("43", ignoreCase = true) }
+        if (idx43 != -1 && idx43 + 2 < hexTokens.size) {
+            // Usually: 43 [count] [byte1] [byte2] ...
+            var i = idx43 + 2
+            while (i + 1 < hexTokens.size) {
+                val b1 = hexTokens[i]
+                val b2 = hexTokens[i + 1]
+                if (b1 != "00" || b2 != "00") {
+                    val codeStr = parseObdDtc(b1, b2)
+                    results.add(matchOrSynthesizeCode(codeStr, module))
+                }
+                i += 2
+            }
+        }
+
+        // Check if UDS 19 02 response (starts with 59 02)
+        val idx59 = hexTokens.indexOfFirst { it.equals("59", ignoreCase = true) }
+        if (idx59 != -1 && idx59 + 3 < hexTokens.size) {
+            var i = idx59 + 3 // skip 59, subfunction, availability mask
+            while (i + 2 < hexTokens.size) {
+                val b1 = hexTokens[i]
+                val b2 = hexTokens[i + 1]
+                // i+2 is failure type / status
+                if (b1 != "00" || b2 != "00") {
+                    val codeStr = parseObdDtc(b1, b2)
+                    results.add(matchOrSynthesizeCode(codeStr, module))
+                }
+                i += 3
+            }
+        }
+
+        return results
+    }
+
+    private fun parseObdDtc(b1Hex: String, b2Hex: String): String {
+        return try {
+            val b1 = b1Hex.toInt(16)
+            val type = when ((b1 shr 6) and 0x03) {
+                0 -> "P"
+                1 -> "C"
+                2 -> "B"
+                3 -> "U"
+                else -> "P"
+            }
+            val d1 = (b1 shr 4) and 0x03
+            val d2 = b1 and 0x0F
+            val d3 = b2Hex.take(1)
+            val d4 = b2Hex.takeLast(1)
+            "$type$d1$d2$d3$d4".uppercase(java.util.Locale.ROOT)
+        } catch (_: Exception) {
+            "P$b1Hex$b2Hex"
+        }
+    }
 }

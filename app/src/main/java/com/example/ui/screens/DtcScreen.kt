@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -54,6 +55,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.DtcCode
 import com.example.model.DtcSeverity
+import com.example.model.EcuModuleState
+import com.example.model.EcuStatus
 import com.example.model.TruckModule
 import com.example.ui.theme.DarkBorder
 import com.example.ui.theme.DarkSurface
@@ -75,6 +78,13 @@ fun DtcScreen(
     onSelectModule: (TruckModule?) -> Unit,
     onScanRequested: () -> Unit,
     onClearFaultsRequested: () -> Unit,
+    ecuStates: Map<TruckModule, EcuModuleState> = emptyMap(),
+    detectedCanBus: String? = null,
+    isCanConnected: Boolean = true,
+    ignitionDetected: Boolean = true,
+    isDiagnosingEcus: Boolean = false,
+    onDiagnoseEcusRequested: () -> Unit = {},
+    isSimulationMode: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var showClearConfirmation by remember { mutableStateOf(false) }
@@ -82,6 +92,10 @@ fun DtcScreen(
 
     val filteredFaults = remember(faults, selectedModule) {
         if (selectedModule == null) faults else faults.filter { it.module == selectedModule }
+    }
+
+    val onlineEcuCount = remember(ecuStates) {
+        ecuStates.values.count { it.status == EcuStatus.ONLINE }
     }
 
     LazyColumn(
@@ -170,6 +184,209 @@ fun DtcScreen(
                             "Сбросить",
                             color = if (faults.isNotEmpty()) GaugeRed else TextMuted
                         )
+                    }
+                }
+            }
+        }
+
+        // ECU Network Status Section
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(DarkSurfaceElevated)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(16.dp))
+                    .padding(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Sensors,
+                            contentDescription = null,
+                            tint = SitrakOrange,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Связь с блоками управления (ECU)",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                            color = TextPrimary
+                        )
+                    }
+
+                    TextButton(
+                        onClick = onDiagnoseEcusRequested,
+                        enabled = !isDiagnosingEcus && !isScanning,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        if (isDiagnosingEcus) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                color = SitrakOrange,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
+                        Text("Тест связи", color = SitrakOrange, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // List of 5 modules with CAN headers and status
+                TruckModule.entries.forEach { module ->
+                    val ecu = ecuStates[module] ?: EcuModuleState(module)
+                    val statusColor = when (ecu.status) {
+                        EcuStatus.ONLINE -> GaugeGreen
+                        EcuStatus.OFFLINE -> GaugeRed
+                        EcuStatus.TESTING -> SitrakOrange
+                        EcuStatus.UNKNOWN -> TextMuted
+                    }
+                    val statusText = when (ecu.status) {
+                        EcuStatus.ONLINE -> "В сети (${ecu.pingMs}мс)"
+                        EcuStatus.OFFLINE -> "Нет ответа"
+                        EcuStatus.TESTING -> "Опрос..."
+                        EcuStatus.UNKNOWN -> "Не опрошен"
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(DarkSurface)
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .background(statusColor, CircleShape)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = module.code,
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = TextPrimary
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "ID: ${module.can29Header}",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 10.sp
+                                        ),
+                                        color = TelemetryCyan
+                                    )
+                                }
+                                Text(
+                                    text = module.displayName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = TextMuted
+                                )
+                            }
+                        }
+
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                text = statusText,
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = statusColor
+                            )
+                            if (ecu.activeDtcCount > 0) {
+                                Text(
+                                    text = "Ошибок: ${ecu.activeDtcCount}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = GaugeYellow
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Troubleshooting Banner if no ECUs respond or CAN disconnected
+        if (!isSimulationMode && (onlineEcuCount == 0 || !isCanConnected)) {
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(DarkSurfaceElevated)
+                        .border(1.dp, GaugeYellow.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+                        .padding(14.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = GaugeYellow,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Блоки Sitrak не отвечают по CAN",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                            color = GaugeYellow
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = "Сканер ELM327 подключен и измеряет 24В (шкала вольтметра работает), но блоки управления не отдают данные. Основные причины:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row {
+                            Text("1. ", color = SitrakOrange, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(
+                                "Зажигание выключено (Клемма 15). Без зажигания CAN-шина Sitrak засыпает. Поверните ключ в положение «ВКЛ / ON» (приборная панель должна загореться).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        }
+                        Row {
+                            Text("2. ", color = SitrakOrange, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(
+                                "Протокол CAN. Sitrak S7H использует SAE J1939 (29 бит / 250k) для MC11/MC13 и TraXon. Приложение автоматически отправляет 29-битные заголовки (18DA00F1).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        }
+                        Row {
+                            Text("3. ", color = SitrakOrange, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(
+                                "Предохранитель разъема OBD (F12) или целостность линий CAN-H / CAN-L на колодке Sitrak.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Button(
+                        onClick = onDiagnoseEcusRequested,
+                        colors = ButtonDefaults.buttonColors(containerColor = SitrakOrange),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Повторить опрос блоков (CAN Ping)", color = Color.Black, fontWeight = FontWeight.Bold)
                     }
                 }
             }

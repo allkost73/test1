@@ -115,6 +115,11 @@ fun SitrakMainScreen(
     val statusNotice by viewModel.statusNotice.collectAsState()
     val rpmHistory by viewModel.rpmHistory.collectAsState()
     val boostHistory by viewModel.boostHistory.collectAsState()
+    val ecuStates by viewModel.ecuStates.collectAsState()
+    val detectedCanBus by viewModel.detectedCanBus.collectAsState()
+    val isCanConnected by viewModel.isCanConnected.collectAsState()
+    val ignitionDetected by viewModel.ignitionDetected.collectAsState()
+    val isDiagnosingEcus by viewModel.isDiagnosingEcus.collectAsState()
 
     // Bluetooth Permissions Launcher for Android 12+ and Android <= 11
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -182,7 +187,11 @@ fun SitrakMainScreen(
                     activeFaults = activeFaults,
                     truckConfig = truckConfig,
                     onNavigateTab = { viewModel.selectTab(it) },
-                    onQuickSaveReport = { viewModel.saveCurrentReport() }
+                    onQuickSaveReport = { viewModel.saveCurrentReport() },
+                    ecuStates = ecuStates,
+                    isCanConnected = isCanConnected,
+                    detectedCanBus = detectedCanBus,
+                    isSimulationMode = isSimulationMode
                 )
 
                 DiagnosticTab.DTC -> DtcScreen(
@@ -191,7 +200,14 @@ fun SitrakMainScreen(
                     selectedModule = selectedModuleFilter,
                     onSelectModule = { viewModel.setModuleFilter(it) },
                     onScanRequested = { viewModel.scanAllModules() },
-                    onClearFaultsRequested = { viewModel.clearAllFaultCodes() }
+                    onClearFaultsRequested = { viewModel.clearAllFaultCodes() },
+                    ecuStates = ecuStates,
+                    detectedCanBus = detectedCanBus,
+                    isCanConnected = isCanConnected,
+                    ignitionDetected = ignitionDetected,
+                    isDiagnosingEcus = isDiagnosingEcus,
+                    onDiagnoseEcusRequested = { viewModel.testAndDiagnoseEcus() },
+                    isSimulationMode = isSimulationMode
                 )
 
                 DiagnosticTab.PARAMETERS -> ParametersScreen(

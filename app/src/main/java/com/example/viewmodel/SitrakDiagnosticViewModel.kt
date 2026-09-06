@@ -10,6 +10,8 @@ import com.example.db.DiagnosticReportEntity
 import com.example.model.BluetoothDeviceInfo
 import com.example.model.DiagnosticTab
 import com.example.model.DtcCode
+import com.example.model.EcuModuleState
+import com.example.model.EcuStatus
 import com.example.model.ElmConnectionState
 import com.example.model.ElmProtocol
 import com.example.model.LiveTelemetry
@@ -41,6 +43,12 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     val selectedProtocol: StateFlow<ElmProtocol> = elmManager.selectedProtocol
     val discoveredDevices: StateFlow<List<BluetoothDeviceInfo>> = elmManager.discoveredDevices
     val isDiscovering: StateFlow<Boolean> = elmManager.isDiscovering
+
+    val ecuStates: StateFlow<Map<TruckModule, EcuModuleState>> = elmManager.ecuStates
+    val detectedCanBus: StateFlow<String?> = elmManager.detectedCanBus
+    val isCanConnected: StateFlow<Boolean> = elmManager.isCanConnected
+    val ignitionDetected: StateFlow<Boolean> = elmManager.ignitionDetected
+    val isDiagnosingEcus: StateFlow<Boolean> = elmManager.isDiagnosingEcus
 
     fun isBluetoothAvailable(): Boolean = elmManager.isBluetoothAvailable()
     fun isBluetoothEnabled(): Boolean = elmManager.isBluetoothEnabled()
@@ -141,37 +149,53 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
         _statusNotice.value = if (enabled) "Режим симулятора Sitrak S7H активирован" else "Симулятор отключен"
     }
 
+    fun testAndDiagnoseEcus() {
+        viewModelScope.launch {
+            _statusNotice.value = "Диагностический опрос блоков Sitrak по шине CAN..."
+            val results = elmManager.diagnoseAllEcus()
+            val onlineCount = results.values.count { it.status == EcuStatus.ONLINE }
+            _statusNotice.value = if (onlineCount > 0) {
+                "Блоки Sitrak в сети: $onlineCount из ${results.size}"
+            } else {
+                "Блоки не отвечают! Включите зажигание (Кл. 15 24V) или проверьте протокол CAN."
+            }
+        }
+    }
+
     fun scanAllModules() {
         viewModelScope.launch {
             _isScanning.value = true
-            _statusNotice.value = "Опрос блоков CAN: ECM (7E0), TCU (7E1), EBS (7E2), SCR (7E4)..."
-            elmManager.sendCommand("ATSH 7E0")
-            delay(300)
-            elmManager.sendCommand("03")
-            delay(400)
-            elmManager.sendCommand("ATSH 7E1")
-            delay(300)
-            elmManager.sendCommand("03")
-            delay(400)
-            elmManager.sendCommand("ATSH 7E4")
-            delay(300)
-            elmManager.sendCommand("03")
+            val proto = elmManager.detectedCanBus.value ?: "CAN"
+            _statusNotice.value = "Диагностика блоков Sitrak S7H по шине $proto..."
 
-            _activeFaults.value = SitrakFaultCodes.sampleActiveFaults
+            val faults = elmManager.scanAllModuleFaults()
+            _activeFaults.value = faults
             _isScanning.value = false
-            _statusNotice.value = "Сканирование завершено: обнаружено ${_activeFaults.value.size} ошибок"
+
+            val onlineCount = elmManager.ecuStates.value.values.count { it.status == EcuStatus.ONLINE }
+            _statusNotice.value = if (onlineCount == 0 && !isSimulationMode.value) {
+                "Блоки не ответили! Включите зажигание Sitrak (Кл. 15), проверьте линию CAN и питание 24V."
+            } else {
+                "Опрос завершен: считано ${faults.size} кодов неисправностей ($onlineCount блоков в сети)"
+            }
         }
     }
 
     fun clearAllFaultCodes() {
         viewModelScope.launch {
             _isScanning.value = true
-            _statusNotice.value = "Отправка команды сброса кодов (04 / 14 FF FF FF)..."
-            val resp = elmManager.sendCommand("04")
-            delay(800)
+            _statusNotice.value = "Отправка команд сброса DTC во все блоки Sitrak (04 / 14 FF FF FF)..."
+            val success = elmManager.clearAllModuleFaults()
+            delay(600)
             _activeFaults.value = emptyList()
             _isScanning.value = false
-            _statusNotice.value = "Коды неисправностей успешно сброшены в блоках Sitrak S7H!"
+            _statusNotice.value = if (success) {
+                "Коды неисправностей успешно сброшены во всех блоках Sitrak!"
+            } else {
+                "Команда сброса отправлена (при активной неисправности код запишется повторно)"
+            }
+            // Refresh ECU status
+            elmManager.diagnoseAllEcus()
         }
     }
 

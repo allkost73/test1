@@ -9,11 +9,16 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import com.example.data.SitrakFaultCodes
 import com.example.model.BluetoothDeviceInfo
+import com.example.model.DtcCode
+import com.example.model.EcuModuleState
+import com.example.model.EcuStatus
 import com.example.model.ElmConnectionState
 import com.example.model.ElmProtocol
 import com.example.model.LiveTelemetry
 import com.example.model.TerminalLogItem
+import com.example.model.TruckModule
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -67,6 +72,26 @@ class Elm327Manager(private val context: Context) {
 
     private val _isDiscovering = MutableStateFlow(false)
     val isDiscovering: StateFlow<Boolean> = _isDiscovering.asStateFlow()
+
+    private val _ecuStates = MutableStateFlow<Map<TruckModule, EcuModuleState>>(
+        TruckModule.entries.associateWith { EcuModuleState(it, EcuStatus.UNKNOWN) }
+    )
+    val ecuStates: StateFlow<Map<TruckModule, EcuModuleState>> = _ecuStates.asStateFlow()
+
+    private val _detectedCanBus = MutableStateFlow<String?>("SAE J1939 CAN (29 бит / 250k)")
+    val detectedCanBus: StateFlow<String?> = _detectedCanBus.asStateFlow()
+
+    private val _isCanConnected = MutableStateFlow(false)
+    val isCanConnected: StateFlow<Boolean> = _isCanConnected.asStateFlow()
+
+    private val _ignitionDetected = MutableStateFlow(false)
+    val ignitionDetected: StateFlow<Boolean> = _ignitionDetected.asStateFlow()
+
+    private val _isDiagnosingEcus = MutableStateFlow(false)
+    val isDiagnosingEcus: StateFlow<Boolean> = _isDiagnosingEcus.asStateFlow()
+
+    var activeCan29Bit: Boolean = true
+        private set
 
     private var bluetoothSocket: BluetoothSocket? = null
     private var inputStream: InputStream? = null
@@ -184,6 +209,9 @@ class Elm327Manager(private val context: Context) {
         } else {
             simJob?.cancel()
             _connectionState.value = ElmConnectionState.Disconnected
+            _ecuStates.value = TruckModule.entries.associateWith { EcuModuleState(it, EcuStatus.UNKNOWN) }
+            _isCanConnected.value = false
+            _ignitionDetected.value = false
         }
     }
 
@@ -226,15 +254,14 @@ class Elm327Manager(private val context: Context) {
                     initZ = sendRawCommandInternal("ATZ")
                 }
 
-                _connectionState.value = ElmConnectionState.Connecting("Настройка параметров ELM (Echo/Linefeed/Spaces)...")
+                _connectionState.value = ElmConnectionState.Connecting("Настройка параметров ELM327 (CAN/Echo/Timing)...")
                 sendRawCommandInternal("ATE0") // Echo Off
                 sendRawCommandInternal("ATL0") // Linefeeds Off
                 sendRawCommandInternal("ATS0") // Spaces Off
-                sendRawCommandInternal("ATAT1") // Adaptive Timing
-
-                val proto = _selectedProtocol.value
-                _connectionState.value = ElmConnectionState.Connecting("Установка протокола CAN (${proto.displayName})...")
-                sendRawCommandInternal(proto.atCommand)
+                sendRawCommandInternal("ATAT1") // Adaptive Timing On
+                sendRawCommandInternal("ATCAF1") // CAN Auto-Formatting On
+                sendRawCommandInternal("ATST64") // 400ms timeout for truck ECUs
+                sendRawCommandInternal("ATH1") // Headers On so we can identify responding ECUs
 
                 _connectionState.value = ElmConnectionState.Connecting("Проверка напряжения бортовой сети 24V (ATRV)...")
                 val voltageResp = sendRawCommandInternal("ATRV")
@@ -243,20 +270,20 @@ class Elm327Manager(private val context: Context) {
                     _telemetry.value = _telemetry.value.copy(batteryVoltage = volt)
                 }
 
-                val protocolResp = sendRawCommandInternal("ATDP")
-                val displayProtocol = if (protocolResp.isNotBlank() && protocolResp != "NO DATA") {
-                    protocolResp
-                } else {
-                    proto.displayName
-                }
+                _connectionState.value = ElmConnectionState.Connecting("Автоопределение протокола CAN Sitrak S7H...")
+                val activeProto = autoDetectSitrakCanProtocol()
+                _detectedCanBus.value = activeProto
+
+                _connectionState.value = ElmConnectionState.Connecting("Диагностический опрос блоков управления (ECM, TCU, EBS)...")
+                diagnoseAllEcus()
 
                 _connectionState.value = ElmConnectionState.Connected(
                     deviceName = deviceName,
-                    protocol = displayProtocol,
+                    protocol = activeProto,
                     isSimulation = false
                 )
 
-                logTerminal("INIT", "ELM327 сопряжен: $initZ | Сеть: $voltageResp | Протокол: $displayProtocol", true)
+                logTerminal("INIT", "ELM327 сопряжен: $initZ | Сеть: $voltageResp | Протокол: $activeProto", true)
                 startPhysicalPolling()
 
             } catch (e: Exception) {
@@ -337,41 +364,51 @@ class Elm327Manager(private val context: Context) {
         pollingJob = scope.launch {
             while (isActive) {
                 try {
-                    // Poll RPM
+                    // Set CAN header to ECM (Engine Bosch EDC17CV44 / MC11-MC13)
+                    val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
+                    sendRawCommandInternal("ATSH $ecmHeader")
+
+                    // Poll RPM (010C)
                     val rpmRaw = sendRawCommandInternal("010C")
                     val rpm = parseRpm(rpmRaw)
+                    val ecmResponded = isPositiveObdOrCanResponse(rpmRaw)
 
-                    // Poll Speed
+                    if (ecmResponded) {
+                        _isCanConnected.value = true
+                        _ignitionDetected.value = true
+                    }
+
+                    // Poll Speed (010D)
                     val speedRaw = sendRawCommandInternal("010D")
                     val speed = parseSpeed(speedRaw)
 
-                    // Poll Coolant Temp
+                    // Poll Coolant Temp (0105)
                     val tempRaw = sendRawCommandInternal("0105")
                     val temp = parseCoolant(tempRaw)
 
-                    // Poll Boost / MAP
+                    // Poll Boost / MAP (010B)
                     val mapRaw = sendRawCommandInternal("010B")
                     val boost = parseMap(mapRaw)
 
-                    // Poll Rail Pressure
+                    // Poll Rail Pressure (0123)
                     val railRaw = sendRawCommandInternal("0123")
                     val rail = parseRailPressure(railRaw)
 
-                    // Poll Battery Voltage
+                    // Poll Battery Voltage via ELM ADC
                     val voltRaw = sendRawCommandInternal("ATRV")
                     val volt = parseVoltage(voltRaw)
 
                     val current = _telemetry.value
                     _telemetry.value = current.copy(
-                        rpm = if (rpm > 0) rpm else current.rpm,
-                        speedKmH = if (speed >= 0) speed else current.speedKmH,
+                        rpm = if (ecmResponded) (if (rpm >= 0) rpm else 0f) else if (_isCanConnected.value) current.rpm else 0f,
+                        speedKmH = if (speed >= 0) speed else 0f,
                         coolantTempC = if (temp > -40) temp else current.coolantTempC,
                         boostPressureBar = if (boost > 0) boost else current.boostPressureBar,
                         fuelRailPressureBar = if (rail > 0) rail else current.fuelRailPressureBar,
                         batteryVoltage = if (volt > 0) volt else current.batteryVoltage
                     )
 
-                    delay(300)
+                    delay(350)
                 } catch (e: Exception) {
                     delay(1500)
                 }
@@ -382,6 +419,20 @@ class Elm327Manager(private val context: Context) {
     fun startSimulationEngine() {
         simJob?.cancel()
         _isSimulationMode.value = true
+        _isCanConnected.value = true
+        _ignitionDetected.value = true
+        _detectedCanBus.value = "SAE J1939 CAN 250k (Эмулятор)"
+
+        _ecuStates.value = TruckModule.entries.associateWith { mod ->
+            EcuModuleState(
+                module = mod,
+                status = EcuStatus.ONLINE,
+                pingMs = Random.nextLong(28, 55),
+                activeDtcCount = if (mod == TruckModule.ECM) 1 else if (mod == TruckModule.SCR) 2 else 0,
+                responseSummary = "В сети (Эмулятор ${mod.displayName})"
+            )
+        }
+
         _connectionState.value = ElmConnectionState.Connected(
             deviceName = "SITRAK S7H (Эмулятор ЭБУ)",
             protocol = "SAE J1939 / ISO 15765-4 CAN 250k (24V)",
@@ -412,6 +463,221 @@ class Elm327Manager(private val context: Context) {
                 delay(300)
             }
         }
+    }
+
+    suspend fun autoDetectSitrakCanProtocol(): String {
+        val userProto = _selectedProtocol.value
+        if (userProto != ElmProtocol.AUTO) {
+            sendRawCommandInternal(userProto.atCommand)
+            activeCan29Bit = userProto.code.contains("29") || userProto.code.contains("J1939")
+            val bcast = if (activeCan29Bit) "18DB33F1" else "7DF"
+            sendRawCommandInternal("ATSH $bcast")
+            return userProto.displayName
+        }
+
+        // 1. Primary Sitrak Standard: SAE J1939 CAN (29 bit / 250 kbps)
+        sendRawCommandInternal("ATSPA")
+        sendRawCommandInternal("ATSH 18DB33F1")
+        var resp = sendRawCommandInternal("0100")
+        if (isPositiveObdOrCanResponse(resp)) {
+            activeCan29Bit = true
+            return "SAE J1939 CAN (29 бит / 250k)"
+        }
+
+        // 1b. Direct Engine ECM Header on J1939
+        sendRawCommandInternal("ATSH 18DA00F1")
+        resp = sendRawCommandInternal("0100")
+        if (isPositiveObdOrCanResponse(resp)) {
+            activeCan29Bit = true
+            return "SAE J1939 CAN (29 бит / 250k - ЭБУ MC13)"
+        }
+
+        // 2. ISO 15765-4 CAN (29 bit / 250 kbps)
+        sendRawCommandInternal("ATSP9")
+        sendRawCommandInternal("ATSH 18DB33F1")
+        resp = sendRawCommandInternal("0100")
+        if (isPositiveObdOrCanResponse(resp)) {
+            activeCan29Bit = true
+            return "ISO 15765-4 CAN (29 бит / 250k)"
+        }
+
+        // 3. ISO 15765-4 CAN (29 bit / 500 kbps)
+        sendRawCommandInternal("ATSP7")
+        sendRawCommandInternal("ATSH 18DB33F1")
+        resp = sendRawCommandInternal("0100")
+        if (isPositiveObdOrCanResponse(resp)) {
+            activeCan29Bit = true
+            return "ISO 15765-4 CAN (29 бит / 500k)"
+        }
+
+        // 4. ISO 15765-4 CAN (11 bit / 500 kbps - Sitrak Gateway / Central Coordinator)
+        sendRawCommandInternal("ATSP6")
+        sendRawCommandInternal("ATSH 7DF")
+        resp = sendRawCommandInternal("0100")
+        if (isPositiveObdOrCanResponse(resp)) {
+            activeCan29Bit = false
+            return "ISO 15765-4 CAN (11 бит / 500k Gateway)"
+        }
+
+        // 4b. Direct 11-bit ECM header
+        sendRawCommandInternal("ATSH 7E0")
+        resp = sendRawCommandInternal("0100")
+        if (isPositiveObdOrCanResponse(resp)) {
+            activeCan29Bit = false
+            return "ISO 15765-4 CAN (11 бит / 500k - ЭБУ EDC17)"
+        }
+
+        // Default fallback: remain on J1939 250k with 29-bit
+        sendRawCommandInternal("ATSPA")
+        sendRawCommandInternal("ATSH 18DA00F1")
+        activeCan29Bit = true
+        return "SAE J1939 CAN (29 бит / 250k - Поиск CAN)"
+    }
+
+    suspend fun diagnoseAllEcus(): Map<TruckModule, EcuModuleState> {
+        _isDiagnosingEcus.value = true
+        val updatedStates = mutableMapOf<TruckModule, EcuModuleState>()
+        var anyOnline = false
+
+        if (_isSimulationMode.value) {
+            delay(300)
+            TruckModule.entries.forEach { mod ->
+                updatedStates[mod] = EcuModuleState(
+                    module = mod,
+                    status = EcuStatus.ONLINE,
+                    pingMs = Random.nextLong(28, 55),
+                    activeDtcCount = if (mod == TruckModule.ECM) 1 else if (mod == TruckModule.SCR) 2 else 0,
+                    responseSummary = "В сети (Эмулятор ${mod.displayName})"
+                )
+            }
+            _ecuStates.value = updatedStates
+            _isCanConnected.value = true
+            _ignitionDetected.value = true
+            _isDiagnosingEcus.value = false
+            return updatedStates
+        }
+
+        for (module in TruckModule.entries) {
+            val startPing = System.currentTimeMillis()
+            val header = if (activeCan29Bit) module.can29Header else module.canId
+            sendRawCommandInternal("ATSH $header")
+            delay(40)
+
+            // Probe with 0100 or 19 02 FF
+            var resp = sendRawCommandInternal("0100")
+            if (!isPositiveObdOrCanResponse(resp)) {
+                resp = sendRawCommandInternal("19 02 FF")
+            }
+            if (!isPositiveObdOrCanResponse(resp)) {
+                resp = sendRawCommandInternal("03")
+            }
+
+            val ping = (System.currentTimeMillis() - startPing).coerceAtLeast(12)
+            if (isPositiveObdOrCanResponse(resp)) {
+                anyOnline = true
+                val dtcs = SitrakFaultCodes.parseDtcResponse(resp, module)
+                updatedStates[module] = EcuModuleState(
+                    module = module,
+                    status = EcuStatus.ONLINE,
+                    pingMs = ping,
+                    activeDtcCount = dtcs.size,
+                    responseSummary = "В сети (${ping}мс): ${resp.take(24)}"
+                )
+            } else {
+                updatedStates[module] = EcuModuleState(
+                    module = module,
+                    status = EcuStatus.OFFLINE,
+                    pingMs = 0,
+                    activeDtcCount = 0,
+                    responseSummary = "Нет ответа",
+                    lastError = "Блок $header не ответил. Проверьте зажигание (Кл. 15), предохранитель или шину CAN."
+                )
+            }
+        }
+
+        _ecuStates.value = updatedStates
+        _isCanConnected.value = anyOnline
+        _ignitionDetected.value = anyOnline
+        _isDiagnosingEcus.value = false
+        return updatedStates
+    }
+
+    suspend fun scanAllModuleFaults(): List<DtcCode> {
+        if (_isSimulationMode.value) {
+            delay(500)
+            return SitrakFaultCodes.sampleActiveFaults
+        }
+
+        val allFaults = mutableListOf<DtcCode>()
+        val updatedStates = _ecuStates.value.toMutableMap()
+
+        for (module in TruckModule.entries) {
+            val header = if (activeCan29Bit) module.can29Header else module.canId
+            sendRawCommandInternal("ATSH $header")
+            delay(80)
+
+            // 1. Standard Mode 03
+            val resp03 = sendRawCommandInternal("03")
+            val dtcs03 = SitrakFaultCodes.parseDtcResponse(resp03, module)
+            allFaults.addAll(dtcs03)
+
+            // 2. UDS Read DTCs (19 02 FF)
+            val resp19 = sendRawCommandInternal("19 02 FF")
+            val dtcs19 = SitrakFaultCodes.parseDtcResponse(resp19, module)
+            val newDtcs = dtcs19.filter { d19 -> allFaults.none { it.obdCode == d19.obdCode } }
+            allFaults.addAll(newDtcs)
+
+            val count = dtcs03.size + newDtcs.size
+            val isOnline = isPositiveObdOrCanResponse(resp03) || isPositiveObdOrCanResponse(resp19)
+            val prev = updatedStates[module] ?: EcuModuleState(module)
+            updatedStates[module] = prev.copy(
+                status = if (isOnline) EcuStatus.ONLINE else EcuStatus.OFFLINE,
+                activeDtcCount = count,
+                responseSummary = if (isOnline) "Ошибок в блоке: $count" else "Блок не ответил"
+            )
+        }
+
+        _ecuStates.value = updatedStates
+        return allFaults
+    }
+
+    suspend fun clearAllModuleFaults(): Boolean {
+        if (_isSimulationMode.value) {
+            delay(400)
+            return true
+        }
+
+        var anyCleared = false
+        // 1. Broadcast Clear
+        val bcast = if (activeCan29Bit) "18DB33F1" else "7DF"
+        sendRawCommandInternal("ATSH $bcast")
+        sendRawCommandInternal("04")
+        sendRawCommandInternal("14 FF FF FF")
+
+        // 2. Clear each ECU individually
+        for (module in TruckModule.entries) {
+            val header = if (activeCan29Bit) module.can29Header else module.canId
+            sendRawCommandInternal("ATSH $header")
+            delay(50)
+            val r1 = sendRawCommandInternal("04")
+            val r2 = sendRawCommandInternal("14 FF FF FF")
+            if (isPositiveObdOrCanResponse(r1) || isPositiveObdOrCanResponse(r2)) {
+                anyCleared = true
+            }
+        }
+        return anyCleared
+    }
+
+    fun isPositiveObdOrCanResponse(resp: String): Boolean {
+        val clean = resp.replace(">", "").replace("\r", " ").replace("\n", " ").trim()
+        if (clean.isEmpty() || clean.contains("NO DATA") || clean.contains("ERROR") ||
+            clean.contains("UNABLE TO CONNECT") || clean.contains("BUS INIT") || clean.contains("?")) {
+            return false
+        }
+        val upper = clean.uppercase(Locale.ROOT)
+        return upper.contains("41 ") || upper.contains("43 ") || upper.contains("44 ") ||
+                upper.contains("59 ") || upper.contains("7E") || upper.contains("18DA") ||
+                upper.contains("62 ") || upper.contains("54") || upper.contains("OK")
     }
 
     suspend fun sendCommand(command: String): String {
@@ -507,7 +773,9 @@ class Elm327Manager(private val context: Context) {
                 String.format(Locale.US, "41 23 %02X %02X", a, b)
             }
             upper == "03" -> "43 04 02 38 20 4F"
+            upper.startsWith("19") -> "59 02 FF 02 38 28 20 4F 29"
             upper == "04" -> "44"
+            upper.startsWith("14") -> "54"
             upper.startsWith("22") -> "62 11 A0 03 F8 12"
             upper.startsWith("2E") -> "6E"
             upper.startsWith("31") -> "71 01"

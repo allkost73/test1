@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.ElectricMeter
 import androidx.compose.material.icons.filled.LocalGasStation
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
@@ -47,8 +48,11 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.model.DiagnosticTab
 import com.example.model.DtcCode
+import com.example.model.EcuModuleState
+import com.example.model.EcuStatus
 import com.example.model.LiveTelemetry
 import com.example.model.TruckConfiguration
+import com.example.model.TruckModule
 import com.example.ui.components.CircularDialGauge
 import com.example.ui.components.LinearBarGauge
 import com.example.ui.theme.DarkBorder
@@ -70,8 +74,14 @@ fun DashboardScreen(
     truckConfig: TruckConfiguration,
     onNavigateTab: (DiagnosticTab) -> Unit,
     onQuickSaveReport: () -> Unit,
+    ecuStates: Map<TruckModule, EcuModuleState> = emptyMap(),
+    isCanConnected: Boolean = true,
+    detectedCanBus: String? = null,
+    isSimulationMode: Boolean = false,
     modifier: Modifier = Modifier
 ) {
+    val onlineEcuCount = ecuStates.values.count { it.status == EcuStatus.ONLINE }
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -141,7 +151,7 @@ fun DashboardScreen(
                                     .padding(horizontal = 8.dp, vertical = 4.dp)
                             ) {
                                 Text(
-                                    text = "24V БОРТСЕТЬ • CAN 250k",
+                                    text = if (onlineEcuCount > 0) "24V • CAN J1939 250k" else "24V БОРТСЕТЬ • CAN 250k",
                                     style = MaterialTheme.typography.labelSmall.copy(
                                         fontFamily = FontFamily.Monospace,
                                         fontWeight = FontWeight.Bold
@@ -198,6 +208,80 @@ fun DashboardScreen(
                             )
                         }
                     }
+                }
+            }
+        }
+
+        // ECU Link Status Strip (Mini Badges for ECM, TCU, EBS, SCR, CBCU)
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(DarkSurfaceElevated)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(12.dp))
+                    .clickable { onNavigateTab(DiagnosticTab.DTC) }
+                    .padding(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Sensors,
+                            contentDescription = null,
+                            tint = SitrakOrange,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Блоки CAN:",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = TextPrimary
+                        )
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TruckModule.entries.forEach { module ->
+                            val state = ecuStates[module]
+                            val dotColor = when (state?.status) {
+                                EcuStatus.ONLINE -> GaugeGreen
+                                EcuStatus.OFFLINE -> GaugeRed
+                                else -> if (isSimulationMode) GaugeGreen else TextMuted
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .background(dotColor, CircleShape)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = module.code,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // If not connected to CAN or ECUs offline, show notice
+                if (!isSimulationMode && (onlineEcuCount == 0 || !isCanConnected)) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "⚠️ Блоки не отвечают. Включите зажигание Sitrak (Кл. 15). Нажмите для проверки.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = GaugeYellow
+                    )
                 }
             }
         }

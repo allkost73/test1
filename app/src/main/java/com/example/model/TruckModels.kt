@@ -1,12 +1,34 @@
 package com.example.model
 
-enum class TruckModule(val code: String, val displayName: String, val canId: String) {
-    ECM("ECM", "Двигатель MC11 / MC13", "7E0"),
-    TCU("TCU", "АКПП ZF TraXon", "7E1"),
-    EBS("EBS", "Тормозная система WABCO", "7E2"),
-    SCR("SCR", "Нейтрализация AdBlue / DPF", "7E4"),
-    CBCU("CBCU", "Кузовная электроника VCU", "7E3")
+enum class TruckModule(
+    val code: String,
+    val displayName: String,
+    val canId: String,
+    val can29Header: String,
+    val j1939Sa: Int
+) {
+    ECM("ECM", "Двигатель MC11 / MC13", "7E0", "18DA00F1", 0x00),
+    TCU("TCU", "АКПП ZF TraXon", "7E1", "18DA03F1", 0x03),
+    EBS("EBS", "Тормозная система WABCO", "7E2", "18DA0BF1", 0x0B),
+    SCR("SCR", "Нейтрализация AdBlue / DPF", "7E4", "18DA3DF1", 0x3D),
+    CBCU("CBCU", "Кузовная электроника VCU", "7E3", "18DA21F1", 0x21)
 }
+
+enum class EcuStatus {
+    ONLINE,      // Отвечает на диагностические запросы (зеленый)
+    OFFLINE,     // Нет ответа / таймаут (серый/красный)
+    UNKNOWN,     // Не опрашивался
+    TESTING      // Идет проверка связи...
+}
+
+data class EcuModuleState(
+    val module: TruckModule,
+    val status: EcuStatus = EcuStatus.UNKNOWN,
+    val pingMs: Long = 0,
+    val activeDtcCount: Int = 0,
+    val responseSummary: String = "",
+    val lastError: String? = null
+)
 
 enum class DtcSeverity {
     CRITICAL,
