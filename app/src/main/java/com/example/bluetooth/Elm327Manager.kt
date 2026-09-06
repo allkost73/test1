@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import com.example.data.SitrakFaultCodes
 import com.example.model.BluetoothDeviceInfo
+import com.example.model.CalibrationResult
 import com.example.model.DtcCode
 import com.example.model.EcuModuleState
 import com.example.model.EcuStatus
@@ -89,6 +90,18 @@ class Elm327Manager(private val context: Context) {
 
     private val _isDiagnosingEcus = MutableStateFlow(false)
     val isDiagnosingEcus: StateFlow<Boolean> = _isDiagnosingEcus.asStateFlow()
+
+    // Persistent Voltage Calibration (24V Sitrak onboard electrical network)
+    private val voltagePrefs = context.getSharedPreferences("sitrak_voltage_prefs", Context.MODE_PRIVATE)
+    var voltageMultiplier: Float = voltagePrefs.getFloat("voltage_multiplier", 1.0f)
+        private set
+    var voltageOffset: Float = voltagePrefs.getFloat("voltage_offset", 0.0f)
+        private set
+    var isVoltageCalibrated: Boolean = voltagePrefs.getBoolean("is_voltage_calibrated", false)
+        private set
+
+    private val _lastRawVoltage = MutableStateFlow(27.6f)
+    val lastRawVoltage: StateFlow<Float> = _lastRawVoltage.asStateFlow()
 
     var activeCan29Bit: Boolean = true
         private set
@@ -212,6 +225,21 @@ class Elm327Manager(private val context: Context) {
             _ecuStates.value = TruckModule.entries.associateWith { EcuModuleState(it, EcuStatus.UNKNOWN) }
             _isCanConnected.value = false
             _ignitionDetected.value = false
+            // Reset telemetry to neutral zero state when exiting simulation mode
+            _telemetry.value = LiveTelemetry(
+                rpm = 0f,
+                speedKmH = 0f,
+                coolantTempC = 0f,
+                oilPressureBar = 0f,
+                fuelRailPressureBar = 0f,
+                boostPressureBar = 0f,
+                batteryVoltage = if (isVoltageCalibrated) 24.0f else 0f,
+                rawElmVoltage = 0f,
+                ecmModuleVoltage = 0f,
+                voltageCalibrationMultiplier = voltageMultiplier,
+                voltageCalibrationOffset = voltageOffset,
+                isVoltageCalibrated = isVoltageCalibrated
+            )
         }
     }
 
@@ -220,6 +248,24 @@ class Elm327Manager(private val context: Context) {
             try {
                 simJob?.cancel()
                 _isSimulationMode.value = false
+                // Purge simulated ECU states and telemetry when connecting to real hardware
+                _ecuStates.value = TruckModule.entries.associateWith { EcuModuleState(it, EcuStatus.UNKNOWN) }
+                _isCanConnected.value = false
+                _ignitionDetected.value = false
+                _telemetry.value = LiveTelemetry(
+                    rpm = 0f,
+                    speedKmH = 0f,
+                    coolantTempC = 0f,
+                    oilPressureBar = 0f,
+                    fuelRailPressureBar = 0f,
+                    boostPressureBar = 0f,
+                    batteryVoltage = if (isVoltageCalibrated) 24.0f else 0f,
+                    rawElmVoltage = 0f,
+                    ecmModuleVoltage = 0f,
+                    voltageCalibrationMultiplier = voltageMultiplier,
+                    voltageCalibrationOffset = voltageOffset,
+                    isVoltageCalibrated = isVoltageCalibrated
+                )
 
                 val adapter = bluetoothAdapter
                     ?: throw IllegalStateException("Bluetooth не поддерживается на этом устройстве")
@@ -398,14 +444,33 @@ class Elm327Manager(private val context: Context) {
                     val voltRaw = sendRawCommandInternal("ATRV")
                     val volt = parseVoltage(voltRaw)
 
+                    // Also poll Digital Voltage directly from Bosch EDC17 engine computer (Mode 01 PID 42)
+                    var ecuVolt = 0f
+                    if (ecmResponded) {
+                        val ecuVoltRaw = sendRawCommandInternal("0142")
+                        ecuVolt = parseModuleVoltage(ecuVoltRaw)
+                    }
+
                     val current = _telemetry.value
+                    val finalVoltage = when {
+                        isVoltageCalibrated && volt > 0f -> volt
+                        ecuVolt > 12f -> ecuVolt
+                        volt > 0f -> volt
+                        else -> current.batteryVoltage
+                    }
+
                     _telemetry.value = current.copy(
                         rpm = if (ecmResponded) (if (rpm >= 0) rpm else 0f) else if (_isCanConnected.value) current.rpm else 0f,
                         speedKmH = if (speed >= 0) speed else 0f,
                         coolantTempC = if (temp > -40) temp else current.coolantTempC,
                         boostPressureBar = if (boost > 0) boost else current.boostPressureBar,
                         fuelRailPressureBar = if (rail > 0) rail else current.fuelRailPressureBar,
-                        batteryVoltage = if (volt > 0) volt else current.batteryVoltage
+                        batteryVoltage = finalVoltage,
+                        rawElmVoltage = if (voltRaw.isNotEmpty() && _lastRawVoltage.value > 0f) _lastRawVoltage.value else current.rawElmVoltage,
+                        ecmModuleVoltage = if (ecuVolt > 0f) ecuVolt else current.ecmModuleVoltage,
+                        voltageCalibrationMultiplier = voltageMultiplier,
+                        voltageCalibrationOffset = voltageOffset,
+                        isVoltageCalibrated = isVoltageCalibrated
                     )
 
                     delay(350)
@@ -748,6 +813,7 @@ class Elm327Manager(private val context: Context) {
         return when {
             upper == "ATZ" -> "ELM327 v1.5 (SITRAK J1939)"
             upper == "ATRV" -> String.format(Locale.US, "%.1fV", _telemetry.value.batteryVoltage)
+            upper.startsWith("ATCV") || upper.startsWith("AT CV") -> "OK"
             upper.startsWith("ATE") -> "OK"
             upper.startsWith("ATL") -> "OK"
             upper.startsWith("ATS") -> "OK"
@@ -757,6 +823,8 @@ class Elm327Manager(private val context: Context) {
             upper == "ATDP" -> "SAE J1939 CAN (29 bit / 250 kbps)"
             upper.startsWith("ATSH") -> "OK"
             upper == "0100" -> "41 00 BE 3F B8 13"
+            upper == "0142" -> "41 42 6C E4" // 27.876V
+            upper == "10 03" || upper == "1003" -> "50 03 00 32 01 F4"
             upper == "010C" -> {
                 val raw = (_telemetry.value.rpm * 4).toInt()
                 val a = (raw shr 8) and 0xFF
@@ -857,9 +925,163 @@ class Elm327Manager(private val context: Context) {
 
     private fun parseVoltage(response: String): Float {
         return try {
-            val clean = response.replace("V", "").replace("v", "").trim()
+            val clean = response.replace("V", "").replace("v", "").replace(">", "").replace("\r", " ").replace("\n", " ").trim()
             val match = Regex("""\d+(\.\d+)?""").find(clean)
-            match?.value?.toFloatOrNull() ?: 0f
+            val raw = match?.value?.toFloatOrNull() ?: 0f
+            if (raw > 0f) {
+                _lastRawVoltage.value = raw
+                val calibrated = (raw * voltageMultiplier) + voltageOffset
+                calibrated.coerceIn(0f, 40f)
+            } else 0f
         } catch (e: Exception) { 0f }
+    }
+
+    private fun parseModuleVoltage(response: String): Float {
+        return try {
+            val clean = response.replace(" ", "").uppercase(Locale.ROOT)
+            val hex = clean.substringAfter("4142", "").take(4)
+            if (hex.length == 4) {
+                val a = hex.substring(0, 2).toInt(16)
+                val b = hex.substring(2, 4).toInt(16)
+                ((a * 256f) + b) / 1000f
+            } else 0f
+        } catch (e: Exception) { 0f }
+    }
+
+    // Voltage Calibration API for 24V commercial vehicle electrical system
+    fun calibrateVoltage(targetVoltage: Float): String {
+        val raw = _lastRawVoltage.value
+        val effectiveRaw = if (raw > 5f) raw else 24.0f
+        voltageMultiplier = (targetVoltage / effectiveRaw).coerceIn(0.2f, 5.0f)
+        voltageOffset = 0f
+        isVoltageCalibrated = true
+
+        voltagePrefs.edit()
+            .putFloat("voltage_multiplier", voltageMultiplier)
+            .putFloat("voltage_offset", 0f)
+            .putBoolean("is_voltage_calibrated", true)
+            .apply()
+
+        // Send hardware calibration command to ELM327 chip (ATCV dddd)
+        scope.launch {
+            if (bluetoothSocket?.isConnected == true) {
+                try {
+                    val dddd = (targetVoltage * 100).toInt().coerceIn(1000, 3999)
+                    sendRawCommandInternal("ATCV $dddd")
+                    sendRawCommandInternal("AT CV " + String.format(Locale.US, "%.1f", targetVoltage))
+                } catch (_: Exception) {}
+            }
+        }
+
+        _telemetry.value = _telemetry.value.copy(
+            batteryVoltage = targetVoltage,
+            rawElmVoltage = effectiveRaw,
+            voltageCalibrationMultiplier = voltageMultiplier,
+            voltageCalibrationOffset = 0f,
+            isVoltageCalibrated = true
+        )
+        return String.format(Locale.US, "Вольтметр откалиброван: %.1f В (команда ATCV отправлена в ELM327)", targetVoltage)
+    }
+
+    fun resetVoltageCalibration(): String {
+        voltageMultiplier = 1.0f
+        voltageOffset = 0.0f
+        isVoltageCalibrated = false
+
+        voltagePrefs.edit()
+            .putFloat("voltage_multiplier", 1.0f)
+            .putFloat("voltage_offset", 0.0f)
+            .putBoolean("is_voltage_calibrated", false)
+            .apply()
+
+        scope.launch {
+            if (bluetoothSocket?.isConnected == true) {
+                try {
+                    sendRawCommandInternal("ATCV 0000")
+                    sendRawCommandInternal("AT CV 0000")
+                } catch (_: Exception) {}
+            }
+        }
+
+        val raw = _lastRawVoltage.value
+        val restored = if (raw > 0f) raw else 24.0f
+        _telemetry.value = _telemetry.value.copy(
+            batteryVoltage = restored,
+            voltageCalibrationMultiplier = 1.0f,
+            voltageCalibrationOffset = 0.0f,
+            isVoltageCalibrated = false
+        )
+        return "Калибровка вольтметра сброшена к заводским значениям ELM327"
+    }
+
+    fun adjustVoltageStep(delta: Float): String {
+        val current = _telemetry.value.batteryVoltage
+        val target = (current + delta).coerceIn(10f, 36f)
+        return calibrateVoltage(target)
+    }
+
+    // UDS Diagnostic Service 2E (WriteDataByIdentifier) with Session Control & Header targeting
+    suspend fun writeEcuParameter(
+        module: TruckModule,
+        did: String,
+        dataHex: String,
+        description: String
+    ): CalibrationResult {
+        if (_isSimulationMode.value) {
+            delay(500)
+            logTerminal("2E $did $dataHex", "6E $did", true)
+            return CalibrationResult.Success("Калибровка «$description» успешно записана в ЭБУ (Режим симулятора)!")
+        }
+
+        if (bluetoothSocket?.isConnected != true) {
+            return CalibrationResult.NoResponse("Нет связи со сканером ELM327. Подключитесь к адаптеру по Bluetooth.")
+        }
+
+        return try {
+            // 1. Set CAN Header to targeted ECU (e.g. ECM 18DA00F1 or 7E0)
+            val header = if (activeCan29Bit) module.can29Header else module.canId
+            sendRawCommandInternal("ATSH $header")
+            delay(60)
+
+            // 2. Request Extended Diagnostic Session (UDS 10 03)
+            val sessionResp = sendRawCommandInternal("10 03")
+            logTerminal("10 03 ($header)", sessionResp, isPositiveObdOrCanResponse(sessionResp))
+            delay(60)
+
+            // 3. Send Write Data by Identifier (UDS 2E)
+            val cleanDid = did.trim()
+            val cleanData = dataHex.trim()
+            val writeCmd = "2E $cleanDid $cleanData"
+            val writeResp = sendRawCommandInternal(writeCmd)
+            val isSuccess = writeResp.contains("6E") || writeResp.contains("OK")
+            logTerminal(writeCmd, writeResp, isSuccess)
+
+            when {
+                isSuccess -> {
+                    CalibrationResult.Success("Калибровка «$description» успешно сохранена в ЭБУ ${module.code}!")
+                }
+                writeResp.contains("7F 2E 33") || writeResp.contains("7F 2E 35") || (writeResp.contains("7F") && writeResp.contains("33")) -> {
+                    CalibrationResult.SecurityLocked(
+                        "ЭБУ ${module.code} заблокирован: требуется заводской пароль безопасности (Security Access Seed/Key). " +
+                        "Запись калибровки в Bosch EDC17 защищена от изменения стандартными сканерами ELM327. " +
+                        "Для прошивки лимита скорости требуется дилерский доступ Sinotruk SmartLink или программатор Tricore."
+                    )
+                }
+                writeResp.contains("7F 2E 22") || writeResp.contains("7F 2E 31") -> {
+                    CalibrationResult.ConditionsNotMet(
+                        "Условия калибровки не выполнены (ответ ЭБУ: $writeResp). " +
+                        "Заглушите двигатель, затяните стояночный тормоз и оставьте включенным зажигание (Кл. 15)."
+                    )
+                }
+                writeResp.contains("NO DATA") || writeResp.contains("ERROR") || writeResp.contains("?") -> {
+                    CalibrationResult.NoResponse("ЭБУ ${module.code} не ответил на команду записи (NO DATA). Проверьте зажигание и шину CAN.")
+                }
+                else -> {
+                    CalibrationResult.Error("Ответ ЭБУ ${module.code}: $writeResp")
+                }
+            }
+        } catch (e: Exception) {
+            CalibrationResult.Error("Ошибка передачи команды: ${e.localizedMessage}")
+        }
     }
 }

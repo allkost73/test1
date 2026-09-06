@@ -59,6 +59,11 @@ data class LiveTelemetry(
     val boostPressureBar: Float = 1.05f,
     val adBlueLevelPct: Float = 78f,
     val batteryVoltage: Float = 27.6f, // 24V commercial vehicle charging
+    val rawElmVoltage: Float = 27.6f, // Неоткалиброванный сигнал ATRV со сканера ELM
+    val ecmModuleVoltage: Float = 0f, // Цифровое напряжение с ЭБУ двигателем MC13 (PID 0142)
+    val voltageCalibrationMultiplier: Float = 1.0f,
+    val voltageCalibrationOffset: Float = 0.0f,
+    val isVoltageCalibrated: Boolean = false,
     val fuelRateLPerH: Float = 2.4f,
     val brakeAirTank1Bar: Float = 8.4f,
     val brakeAirTank2Bar: Float = 8.2f,
@@ -128,3 +133,12 @@ enum class DiagnosticTab(val title: String) {
     TERMINAL("ELM Терминал"),
     HISTORY("История")
 }
+
+sealed class CalibrationResult {
+    data class Success(val message: String) : CalibrationResult()
+    data class SecurityLocked(val message: String) : CalibrationResult()
+    data class ConditionsNotMet(val message: String) : CalibrationResult()
+    data class NoResponse(val message: String) : CalibrationResult()
+    data class Error(val message: String) : CalibrationResult()
+}
+

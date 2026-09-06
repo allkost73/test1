@@ -37,11 +37,15 @@ import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -120,6 +124,9 @@ fun SitrakMainScreen(
     val isCanConnected by viewModel.isCanConnected.collectAsState()
     val ignitionDetected by viewModel.ignitionDetected.collectAsState()
     val isDiagnosingEcus by viewModel.isDiagnosingEcus.collectAsState()
+    val calibrationDialogMessage by viewModel.calibrationDialogMessage.collectAsState()
+    val isWritingCalibration by viewModel.isWritingCalibration.collectAsState()
+    val hasScannedRealTruck by viewModel.hasScannedRealTruck.collectAsState()
 
     // Bluetooth Permissions Launcher for Android 12+ and Android <= 11
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -207,7 +214,8 @@ fun SitrakMainScreen(
                     ignitionDetected = ignitionDetected,
                     isDiagnosingEcus = isDiagnosingEcus,
                     onDiagnoseEcusRequested = { viewModel.testAndDiagnoseEcus() },
-                    isSimulationMode = isSimulationMode
+                    isSimulationMode = isSimulationMode,
+                    hasScannedRealTruck = hasScannedRealTruck
                 )
 
                 DiagnosticTab.PARAMETERS -> ParametersScreen(
@@ -226,7 +234,12 @@ fun SitrakMainScreen(
                     onTestCylinderCutout = { viewModel.testCylinderCutout(it) },
                     onUpdateComfortSettings = { buzzer, drl, delay, step, profile ->
                         viewModel.updateComfortSettings(buzzer, drl, delay, step, profile)
-                    }
+                    },
+                    telemetry = telemetry,
+                    isWritingCalibration = isWritingCalibration,
+                    onCalibrateVoltage = { viewModel.calibrateVoltage(it) },
+                    onResetVoltageCalibration = { viewModel.resetVoltageCalibration() },
+                    onAdjustVoltageStep = { viewModel.adjustVoltageStep(it) }
                 )
 
                 DiagnosticTab.TERMINAL -> TerminalScreen(
@@ -302,6 +315,46 @@ fun SitrakMainScreen(
                         }
                     }
                 }
+            }
+
+            // Calibration Response Alert Dialog (Security Locked / Success / Error details)
+            calibrationDialogMessage?.let { message ->
+                AlertDialog(
+                    onDismissRequest = { viewModel.dismissCalibrationDialog() },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Default.Security,
+                            contentDescription = null,
+                            tint = SitrakOrange,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    },
+                    title = {
+                        Text(
+                            text = "Калибровка ЭБУ Sitrak",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = TextPrimary
+                        )
+                    },
+                    text = {
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextSecondary
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = { viewModel.dismissCalibrationDialog() },
+                            colors = ButtonDefaults.buttonColors(containerColor = SitrakOrange)
+                        ) {
+                            Text("Понятно", color = Color.Black, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    containerColor = DarkSurfaceElevated,
+                    titleContentColor = TextPrimary,
+                    textContentColor = TextSecondary
+                )
             }
         }
     }

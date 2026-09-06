@@ -85,6 +85,7 @@ fun DtcScreen(
     isDiagnosingEcus: Boolean = false,
     onDiagnoseEcusRequested: () -> Unit = {},
     isSimulationMode: Boolean = false,
+    hasScannedRealTruck: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     var showClearConfirmation by remember { mutableStateOf(false) }
@@ -442,31 +443,67 @@ fun DtcScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(64.dp)
-                                .background(GaugeGreen.copy(alpha = 0.15f), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = "No errors",
-                                tint = GaugeGreen,
-                                modifier = Modifier.size(36.dp)
+                        if (!isSimulationMode && !hasScannedRealTruck) {
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .background(SitrakOrange.copy(alpha = 0.15f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "Демо ошибки очищены",
+                                    tint = SitrakOrange,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "Ошибки демо-режима очищены",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Реальное подключение активно. Нажмите «Считать ошибки», чтобы опросить блоки Sitrak S7H.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Button(
+                                onClick = onScanRequested,
+                                colors = ButtonDefaults.buttonColors(containerColor = SitrakOrange),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text("Считать ошибки с блоков Sitrak", color = Color.Black, fontWeight = FontWeight.Bold)
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .background(GaugeGreen.copy(alpha = 0.15f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "No errors",
+                                    tint = GaugeGreen,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "Кодов неисправностей не обнаружено",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "ЭБУ двигателя MC13, АКПП и тормозная система работают в штатном режиме",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
                             )
                         }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "Кодов неисправностей не обнаружено",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = TextPrimary
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "ЭБУ двигателя MC13, АКПП и тормозная система работают в штатном режиме",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
-                        )
                     }
                 }
             }

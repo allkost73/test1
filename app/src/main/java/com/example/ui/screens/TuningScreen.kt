@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
@@ -34,6 +35,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
@@ -53,8 +56,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.model.LiveTelemetry
 import com.example.model.TruckConfiguration
 import com.example.ui.theme.DarkBorder
 import com.example.ui.theme.DarkSurface
@@ -68,6 +73,8 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 
+import java.util.Locale
+
 @Composable
 fun TuningScreen(
     truckConfig: TruckConfiguration,
@@ -78,10 +85,16 @@ fun TuningScreen(
     onResetAdBlueDerate: () -> Unit,
     onTestCylinderCutout: (Int) -> Unit,
     onUpdateComfortSettings: (Boolean, String, Int, Int, String) -> Unit,
+    telemetry: LiveTelemetry = LiveTelemetry(),
+    isWritingCalibration: Boolean = false,
+    onCalibrateVoltage: (Float) -> Unit = {},
+    onResetVoltageCalibration: () -> Unit = {},
+    onAdjustVoltageStep: (Float) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var tempSpeedLimit by remember(truckConfig.speedLimitKmH) { mutableFloatStateOf(truckConfig.speedLimitKmH.toFloat()) }
     var tempIdleRpm by remember(truckConfig.idleRpm) { mutableFloatStateOf(truckConfig.idleRpm.toFloat()) }
+    var manualVoltText by remember { mutableStateOf("") }
 
     var reverseBuzzer by remember(truckConfig.reverseBuzzer) { mutableStateOf(truckConfig.reverseBuzzer) }
     var drlMode by remember(truckConfig.drlMode) { mutableStateOf(truckConfig.drlMode) }
@@ -96,6 +109,196 @@ fun TuningScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Section 0: Voltage Calibration (Калибровка вольтметра бортовой сети Sitrak 24В)
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(DarkSurfaceElevated)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(16.dp))
+                    .padding(16.dp)
+                    .testTag("card_voltage_calibration")
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(imageVector = Icons.Default.ElectricBolt, contentDescription = null, tint = GaugeYellow)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = "Калибровка вольтметра (24В)",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = if (telemetry.isVoltageCalibrated) "Пользовательская калибровка активна" else "Заводской делитель АЦП ELM327",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (telemetry.isVoltageCalibrated) GaugeGreen else TextMuted
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = String.format(Locale.US, "%.1f В", telemetry.batteryVoltage),
+                        style = MaterialTheme.typography.headlineSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        ),
+                        color = if (telemetry.batteryVoltage in 26.0f..29.0f) GaugeGreen else GaugeYellow
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Voltage Diagnostic Detail Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(DarkSurface)
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Сырое напряжение с адаптера (ATRV):",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
+                        )
+                        if (telemetry.ecmModuleVoltage > 0f) {
+                            Text(
+                                text = "Напряжение ЭБУ Bosch EDC17 (PID 0142):",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TelemetryCyan
+                            )
+                        }
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = String.format(Locale.US, "%.2f В", if (telemetry.rawElmVoltage > 0f) telemetry.rawElmVoltage else telemetry.batteryVoltage),
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold),
+                            color = TextPrimary
+                        )
+                        if (telemetry.ecmModuleVoltage > 0f) {
+                            Text(
+                                text = String.format(Locale.US, "%.2f В", telemetry.ecmModuleVoltage),
+                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold),
+                                color = TelemetryCyan
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Quick Step adjustments (-0.5, -0.1, +0.1, +0.5)
+                Text(
+                    text = "Быстрая подгонка шагом:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(-0.5f to "-0.5В", -0.1f to "-0.1В", 0.1f to "+0.1В", 0.5f to "+0.5В").forEach { (delta, label) ->
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF21262D))
+                                .clickable { onAdjustVoltageStep(delta) }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Direct Target Input Field & Apply
+                Text(
+                    text = "Задать точное значение с мультиметра:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = manualVoltText,
+                        onValueChange = { manualVoltText = it },
+                        placeholder = { Text("Напр. 27.8", fontSize = 13.sp, color = TextMuted) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = SitrakOrange,
+                            unfocusedBorderColor = DarkBorder,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(50.dp)
+                    )
+
+                    Button(
+                        onClick = {
+                            val parsed = manualVoltText.replace(",", ".").toFloatOrNull()
+                            if (parsed != null && parsed in 10.0f..36.0f) {
+                                onCalibrateVoltage(parsed)
+                                manualVoltText = ""
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = SitrakOrange),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.height(50.dp)
+                    ) {
+                        Text("Откалибровать", color = Color.Black, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Footer Reset and hint
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Норма генератора: 27.2 – 28.6 В",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted
+                    )
+
+                    Text(
+                        text = "Сбросить к заводскому АЦП",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = SitrakOrange,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { onResetVoltageCalibration() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        }
         // Section 1: Speed Limiter
         item {
             Column(
@@ -174,11 +377,18 @@ fun TuningScreen(
 
                 Button(
                     onClick = { onUpdateSpeedLimit(tempSpeedLimit.toInt()) },
+                    enabled = !isWritingCalibration,
                     colors = ButtonDefaults.buttonColors(containerColor = SitrakOrange),
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth().testTag("btn_save_speed_limit")
                 ) {
-                    Text("Записать в ЭБУ двигателя (${tempSpeedLimit.toInt()} км/ч)", color = Color.Black, fontWeight = FontWeight.Bold)
+                    if (isWritingCalibration) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.Black, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Запись в ЭБУ...", color = Color.Black, fontWeight = FontWeight.Bold)
+                    } else {
+                        Text("Записать в ЭБУ двигателя (${tempSpeedLimit.toInt()} км/ч)", color = Color.Black, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
@@ -265,10 +475,17 @@ fun TuningScreen(
 
                 OutlinedButton(
                     onClick = { onUpdateIdleRpm(tempIdleRpm.toInt()) },
+                    enabled = !isWritingCalibration,
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth().testTag("btn_save_idle_rpm")
                 ) {
-                    Text("Применить калибровку ХХ (${tempIdleRpm.toInt()} об/мин)", color = TextPrimary)
+                    if (isWritingCalibration) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), color = TelemetryCyan, strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Запись в ЭБУ...", color = TextPrimary)
+                    } else {
+                        Text("Применить калибровку ХХ (${tempIdleRpm.toInt()} об/мин)", color = TextPrimary)
+                    }
                 }
             }
         }

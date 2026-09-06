@@ -8,6 +8,7 @@ import com.example.data.SitrakFaultCodes
 import com.example.db.AppDatabase
 import com.example.db.DiagnosticReportEntity
 import com.example.model.BluetoothDeviceInfo
+import com.example.model.CalibrationResult
 import com.example.model.DiagnosticTab
 import com.example.model.DtcCode
 import com.example.model.EcuModuleState
@@ -59,8 +60,18 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     private val _currentTab = MutableStateFlow(DiagnosticTab.DASHBOARD)
     val currentTab: StateFlow<DiagnosticTab> = _currentTab.asStateFlow()
 
-    private val _activeFaults = MutableStateFlow<List<DtcCode>>(SitrakFaultCodes.sampleActiveFaults)
+    // Active DTCs are initially empty to ensure demo faults NEVER leak into real vehicle connections
+    private val _activeFaults = MutableStateFlow<List<DtcCode>>(emptyList())
     val activeFaults: StateFlow<List<DtcCode>> = _activeFaults.asStateFlow()
+
+    private val _hasScannedRealTruck = MutableStateFlow(false)
+    val hasScannedRealTruck: StateFlow<Boolean> = _hasScannedRealTruck.asStateFlow()
+
+    private val _calibrationDialogMessage = MutableStateFlow<String?>(null)
+    val calibrationDialogMessage: StateFlow<String?> = _calibrationDialogMessage.asStateFlow()
+
+    private val _isWritingCalibration = MutableStateFlow(false)
+    val isWritingCalibration: StateFlow<Boolean> = _isWritingCalibration.asStateFlow()
 
     private val _selectedModuleFilter = MutableStateFlow<TruckModule?>(null)
     val selectedModuleFilter: StateFlow<TruckModule?> = _selectedModuleFilter.asStateFlow()
@@ -94,6 +105,10 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
 
     init {
         refreshPairedDevices()
+        // If simulation mode is active on start, populate demo faults
+        if (elmManager.isSimulationMode.value) {
+            _activeFaults.value = SitrakFaultCodes.sampleActiveFaults
+        }
         // Collect telemetry to append to graph
         viewModelScope.launch {
             elmManager.telemetry.collect { telem ->
@@ -137,16 +152,33 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     }
 
     fun connectDevice(device: BluetoothDeviceInfo) {
+        // CRITICAL: Immediately purge all demo DTCs and reset scan status when connecting to physical truck
+        _activeFaults.value = emptyList()
+        _hasScannedRealTruck.value = false
+        _statusNotice.value = "Подключение к ${device.name}... Ошибки демо-режима очищены."
         elmManager.connectToDevice(device.address, device.name)
     }
 
     fun disconnect() {
         elmManager.disconnect()
+        _activeFaults.value = emptyList()
+        _hasScannedRealTruck.value = false
     }
 
     fun setSimulationMode(enabled: Boolean) {
         elmManager.setSimulationMode(enabled)
-        _statusNotice.value = if (enabled) "Режим симулятора Sitrak S7H активирован" else "Симулятор отключен"
+        if (enabled) {
+            _activeFaults.value = SitrakFaultCodes.sampleActiveFaults
+            _statusNotice.value = "Режим симулятора Sitrak S7H активирован (тестовые коды DTC)"
+        } else {
+            _activeFaults.value = emptyList()
+            _hasScannedRealTruck.value = false
+            _statusNotice.value = "Симулятор отключен. Ошибки демо-режима удалены."
+        }
+    }
+
+    fun dismissCalibrationDialog() {
+        _calibrationDialogMessage.value = null
     }
 
     fun testAndDiagnoseEcus() {
@@ -170,6 +202,7 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
 
             val faults = elmManager.scanAllModuleFaults()
             _activeFaults.value = faults
+            _hasScannedRealTruck.value = true
             _isScanning.value = false
 
             val onlineCount = elmManager.ecuStates.value.values.count { it.status == EcuStatus.ONLINE }
@@ -201,22 +234,93 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
 
     fun updateSpeedLimit(newLimitKmH: Int) {
         viewModelScope.launch {
-            _statusNotice.value = "Запись калибровки ограничителя скорости ($newLimitKmH км/ч) в ЭБУ..."
-            elmManager.sendCommand("2E 11 40 00 $newLimitKmH")
-            delay(500)
-            _truckConfig.value = _truckConfig.value.copy(speedLimitKmH = newLimitKmH)
-            _statusNotice.value = "Ограничитель скорости установлен: $newLimitKmH км/ч"
+            _isWritingCalibration.value = true
+            _statusNotice.value = "Запись калибровки ограничителя скорости ($newLimitKmH км/ч) в ЭБУ двигателя..."
+            
+            val hexSpeed = String.format(Locale.US, "%02X", newLimitKmH)
+            val result = elmManager.writeEcuParameter(
+                module = TruckModule.ECM,
+                did = "11 40",
+                dataHex = "00 $hexSpeed",
+                description = "Ограничитель скорости $newLimitKmH км/ч"
+            )
+            _isWritingCalibration.value = false
+
+            when (result) {
+                is CalibrationResult.Success -> {
+                    _truckConfig.value = _truckConfig.value.copy(speedLimitKmH = newLimitKmH)
+                    _statusNotice.value = result.message
+                }
+                is CalibrationResult.SecurityLocked -> {
+                    _calibrationDialogMessage.value = result.message
+                    _statusNotice.value = "ЭБУ отклонил запись: требуется заводской код доступа (Security Access)"
+                }
+                is CalibrationResult.ConditionsNotMet -> {
+                    _calibrationDialogMessage.value = result.message
+                    _statusNotice.value = "Условия записи не выполнены (проверьте ручник и зажигание)"
+                }
+                is CalibrationResult.NoResponse -> {
+                    _statusNotice.value = result.message
+                }
+                is CalibrationResult.Error -> {
+                    _statusNotice.value = result.message
+                }
+            }
         }
     }
 
     fun updateIdleRpm(newRpm: Int) {
         viewModelScope.launch {
-            _statusNotice.value = "Корректировка холостого хода ($newRpm об/мин)..."
-            elmManager.sendCommand("2E 11 42 0${newRpm / 10}")
-            delay(400)
-            _truckConfig.value = _truckConfig.value.copy(idleRpm = newRpm)
-            _statusNotice.value = "Холостой ход Sitrak отрегулирован на $newRpm об/мин"
+            _isWritingCalibration.value = true
+            _statusNotice.value = "Запись калибровки холостого хода ($newRpm об/мин) в ЭБУ двигателя..."
+            
+            val rawValue = newRpm / 10
+            val hexRpm = String.format(Locale.US, "%04X", rawValue)
+            val result = elmManager.writeEcuParameter(
+                module = TruckModule.ECM,
+                did = "11 42",
+                dataHex = hexRpm,
+                description = "Холостой ход $newRpm об/мин"
+            )
+            _isWritingCalibration.value = false
+
+            when (result) {
+                is CalibrationResult.Success -> {
+                    _truckConfig.value = _truckConfig.value.copy(idleRpm = newRpm)
+                    _statusNotice.value = result.message
+                }
+                is CalibrationResult.SecurityLocked -> {
+                    _calibrationDialogMessage.value = result.message
+                    _statusNotice.value = "ЭБУ отклонил запись: требуется заводской код доступа (Security Access)"
+                }
+                is CalibrationResult.ConditionsNotMet -> {
+                    _calibrationDialogMessage.value = result.message
+                    _statusNotice.value = "Условия записи не выполнены: заглушите двигатель и включите ручник."
+                }
+                is CalibrationResult.NoResponse -> {
+                    _statusNotice.value = result.message
+                }
+                is CalibrationResult.Error -> {
+                    _statusNotice.value = result.message
+                }
+            }
         }
+    }
+
+    // Voltage calibration APIs for 24V commercial vehicle onboard network
+    fun calibrateVoltage(targetVoltage: Float) {
+        val msg = elmManager.calibrateVoltage(targetVoltage)
+        _statusNotice.value = msg
+    }
+
+    fun resetVoltageCalibration() {
+        val msg = elmManager.resetVoltageCalibration()
+        _statusNotice.value = msg
+    }
+
+    fun adjustVoltageStep(delta: Float) {
+        val msg = elmManager.adjustVoltageStep(delta)
+        _statusNotice.value = msg
     }
 
     fun triggerDpfRegeneration() {
