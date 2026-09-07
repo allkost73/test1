@@ -481,6 +481,13 @@ class Elm327Manager(private val context: Context) {
         }
     }
 
+    @Volatile
+    private var _drivingMode: String = "Сбалансированный"
+
+    fun setDrivingMode(mode: String) {
+        _drivingMode = mode
+    }
+
     fun startSimulationEngine() {
         simJob?.cancel()
         _isSimulationMode.value = true
@@ -506,12 +513,32 @@ class Elm327Manager(private val context: Context) {
 
         simJob = scope.launch {
             while (isActive) {
-                val rpmFlutter = (Random.nextFloat() - 0.5f) * 18f
-                val targetRpm = (620f + rpmFlutter).coerceIn(580f, 750f)
+                val mode = com.example.model.DrivingMode.fromString(_drivingMode)
+                val baseRpm = when (mode) {
+                    com.example.model.DrivingMode.ECO -> 570f
+                    com.example.model.DrivingMode.HEAVY -> 680f
+                    com.example.model.DrivingMode.BALANCED -> 620f
+                }
+                val baseRail = when (mode) {
+                    com.example.model.DrivingMode.ECO -> 460f
+                    com.example.model.DrivingMode.HEAVY -> 640f
+                    com.example.model.DrivingMode.BALANCED -> 520f
+                }
+                val baseBoost = when (mode) {
+                    com.example.model.DrivingMode.ECO -> 0.96f
+                    com.example.model.DrivingMode.HEAVY -> 1.16f
+                    com.example.model.DrivingMode.BALANCED -> 1.04f
+                }
+                val baseOil = when (mode) {
+                    com.example.model.DrivingMode.HEAVY -> 4.2f
+                    else -> 3.8f
+                }
+                val rpmFlutter = (Random.nextFloat() - 0.5f) * 12f
+                val targetRpm = (baseRpm + rpmFlutter).coerceIn(540f, 750f)
                 val voltFlutter = 27.6f + (Random.nextFloat() - 0.5f) * 0.4f
-                val railFlutter = 520f + (Random.nextFloat() - 0.5f) * 25f
-                val boostFlutter = 1.04f + (Random.nextFloat() - 0.5f) * 0.04f
-                val oilFlutter = 3.8f + (Random.nextFloat() - 0.5f) * 0.15f
+                val railFlutter = baseRail + (Random.nextFloat() - 0.5f) * 18f
+                val boostFlutter = baseBoost + (Random.nextFloat() - 0.5f) * 0.02f
+                val oilFlutter = baseOil + (Random.nextFloat() - 0.5f) * 0.12f
                 val air1 = 8.4f + (Random.nextFloat() - 0.5f) * 0.1f
                 val air2 = 8.2f + (Random.nextFloat() - 0.5f) * 0.1f
 

@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.model.DiagnosticTab
+import com.example.model.DrivingMode
 import com.example.model.DtcCode
 import com.example.model.EcuModuleState
 import com.example.model.EcuStatus
@@ -78,6 +79,7 @@ fun DashboardScreen(
     isCanConnected: Boolean = true,
     detectedCanBus: String? = null,
     isSimulationMode: Boolean = false,
+    onSelectDrivingMode: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val onlineEcuCount = ecuStates.values.count { it.status == EcuStatus.ONLINE }
@@ -209,6 +211,115 @@ fun DashboardScreen(
                         }
                     }
                 }
+            }
+        }
+
+        // Driving Mode Switcher (Сбалансированный / Экономичный / Тяжёлый)
+        item {
+            val activeMode = DrivingMode.fromString(truckConfig.throttleProfile)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(DarkSurfaceElevated)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(16.dp))
+                    .padding(14.dp)
+                    .testTag("card_driving_mode_selector")
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Speed,
+                            contentDescription = null,
+                            tint = SitrakOrange,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Режим движения:",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = TextSecondary
+                        )
+                    }
+
+                    val modeColor = when (activeMode) {
+                        DrivingMode.BALANCED -> TelemetryCyan
+                        DrivingMode.ECO -> GaugeGreen
+                        DrivingMode.HEAVY -> SitrakOrange
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .background(modeColor.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                            .border(1.dp, modeColor.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = activeMode.title,
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = modeColor
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    DrivingMode.entries.forEach { mode ->
+                        val isSelected = activeMode == mode
+                        val (btnColor, activeBorder) = when (mode) {
+                            DrivingMode.BALANCED -> Pair(TelemetryCyan, TelemetryCyan)
+                            DrivingMode.ECO -> Pair(GaugeGreen, GaugeGreen)
+                            DrivingMode.HEAVY -> Pair(SitrakOrange, SitrakOrange)
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isSelected) btnColor.copy(alpha = 0.22f) else DarkSurface)
+                                .border(
+                                    width = if (isSelected) 1.5.dp else 1.dp,
+                                    color = if (isSelected) activeBorder else DarkBorder,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .clickable { onSelectDrivingMode(mode.title) }
+                                .padding(vertical = 10.dp, horizontal = 4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = mode.title,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = if (isSelected) btnColor else TextPrimary,
+                                    maxLines = 1
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = mode.subtitle,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                    color = if (isSelected) btnColor.copy(alpha = 0.85f) else TextMuted,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = activeMode.description,
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                    color = TextSecondary,
+                    modifier = Modifier.padding(horizontal = 2.dp)
+                )
             }
         }
 

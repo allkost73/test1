@@ -198,7 +198,8 @@ fun SitrakMainScreen(
                     ecuStates = ecuStates,
                     isCanConnected = isCanConnected,
                     detectedCanBus = detectedCanBus,
-                    isSimulationMode = isSimulationMode
+                    isSimulationMode = isSimulationMode,
+                    onSelectDrivingMode = { viewModel.updateDrivingMode(it) }
                 )
 
                 DiagnosticTab.DTC -> DtcScreen(
@@ -239,7 +240,8 @@ fun SitrakMainScreen(
                     isWritingCalibration = isWritingCalibration,
                     onCalibrateVoltage = { viewModel.calibrateVoltage(it) },
                     onResetVoltageCalibration = { viewModel.resetVoltageCalibration() },
-                    onAdjustVoltageStep = { viewModel.adjustVoltageStep(it) }
+                    onAdjustVoltageStep = { viewModel.adjustVoltageStep(it) },
+                    onUpdateDrivingMode = { viewModel.updateDrivingMode(it) }
                 )
 
                 DiagnosticTab.TERMINAL -> TerminalScreen(

@@ -10,6 +10,7 @@ import com.example.db.DiagnosticReportEntity
 import com.example.model.BluetoothDeviceInfo
 import com.example.model.CalibrationResult
 import com.example.model.DiagnosticTab
+import com.example.model.DrivingMode
 import com.example.model.DtcCode
 import com.example.model.EcuModuleState
 import com.example.model.EcuStatus
@@ -379,6 +380,58 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
         }
     }
 
+    fun updateDrivingMode(mode: String) {
+        viewModelScope.launch {
+            val drivingMode = DrivingMode.fromString(mode)
+            val normalizedTitle = drivingMode.title
+            _truckConfig.value = _truckConfig.value.copy(throttleProfile = normalizedTitle)
+            elmManager.setDrivingMode(normalizedTitle)
+            _isWritingCalibration.value = true
+
+            // Send to Engine ECU (ECM Bosch EDC17) via UDS Service 2E DID 01 03
+            val ecmResult = elmManager.writeEcuParameter(
+                module = TruckModule.ECM,
+                did = "01 03",
+                dataHex = drivingMode.udsCode,
+                description = "Режим двигателя MC13: $normalizedTitle"
+            )
+
+            // Also send to Transmission TCU (ZF TraXon) DID 02 01
+            elmManager.writeEcuParameter(
+                module = TruckModule.TCU,
+                did = "02 01",
+                dataHex = drivingMode.udsCode,
+                description = "Программа АКПП TraXon: $normalizedTitle"
+            )
+
+            _isWritingCalibration.value = false
+
+            val notice = when (drivingMode) {
+                DrivingMode.ECO -> "Режим «Экономичный» активирован: ограничение расхода, эко-карта TraXon."
+                DrivingMode.HEAVY -> "Режим «Тяжёлый» активирован: максимальный крутящий момент 2500 Нм, динамичный наддув."
+                DrivingMode.BALANCED -> "Режим «Сбалансированный» активирован: заводская балансировка мощности и расхода MC13."
+            }
+            _statusNotice.value = notice
+
+            when (ecmResult) {
+                is CalibrationResult.SecurityLocked -> {
+                    _calibrationDialogMessage.value = ecmResult.message
+                }
+                is CalibrationResult.ConditionsNotMet -> {
+                    _calibrationDialogMessage.value = ecmResult.message
+                }
+                is CalibrationResult.NoResponse -> {
+                    if (!isSimulationMode.value) {
+                        _calibrationDialogMessage.value = ecmResult.message
+                    }
+                }
+                else -> {
+                    // Success
+                }
+            }
+        }
+    }
+
     fun updateComfortSettings(
         reverseBuzzer: Boolean,
         drlMode: String,
@@ -387,13 +440,16 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
         throttleProfile: String
     ) {
         viewModelScope.launch {
+            val drivingMode = DrivingMode.fromString(throttleProfile)
+            val normalizedTitle = drivingMode.title
             _truckConfig.value = _truckConfig.value.copy(
                 reverseBuzzer = reverseBuzzer,
                 drlMode = drlMode,
                 headlightDelaySec = headlightDelaySec,
                 cruiseStepKmH = cruiseStepKmH,
-                throttleProfile = throttleProfile
+                throttleProfile = normalizedTitle
             )
+            elmManager.setDrivingMode(normalizedTitle)
             elmManager.sendCommand("2E 11 88 01")
             _statusNotice.value = "Параметры блока кабины CBCU сохранены"
         }

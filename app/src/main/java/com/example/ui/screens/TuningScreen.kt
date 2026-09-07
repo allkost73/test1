@@ -59,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.model.DrivingMode
 import com.example.model.LiveTelemetry
 import com.example.model.TruckConfiguration
 import com.example.ui.theme.DarkBorder
@@ -90,6 +91,7 @@ fun TuningScreen(
     onCalibrateVoltage: (Float) -> Unit = {},
     onResetVoltageCalibration: () -> Unit = {},
     onAdjustVoltageStep: (Float) -> Unit = {},
+    onUpdateDrivingMode: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var tempSpeedLimit by remember(truckConfig.speedLimitKmH) { mutableFloatStateOf(truckConfig.speedLimitKmH.toFloat()) }
@@ -728,35 +730,136 @@ fun TuningScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                // Throttle Profile
-                Text("Отклик педали акселератора:", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-                Spacer(modifier = Modifier.height(6.dp))
+                // Driving Modes & Throttle Response
+                val activeMode = DrivingMode.fromString(truckConfig.throttleProfile)
+
+                Text(
+                    text = "Режим движения и отклик педали (MC13 + TraXon):",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                    color = TextPrimary
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Переключение программы управления крутящим моментом и коробкой передач:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    listOf("Стандарт", "Эко", "Тяжелый груз").forEach { prof ->
-                        val selected = throttleProfile == prof
+                    DrivingMode.entries.forEach { mode ->
+                        val isSelected = activeMode == mode
+                        val (accentColor, _) = when (mode) {
+                            DrivingMode.BALANCED -> Pair(TelemetryCyan, TelemetryCyan)
+                            DrivingMode.ECO -> Pair(GaugeGreen, GaugeGreen)
+                            DrivingMode.HEAVY -> Pair(SitrakOrange, SitrakOrange)
+                        }
+
                         Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (selected) TelemetryCyan else Color(0xFF21262D))
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isSelected) accentColor.copy(alpha = 0.22f) else DarkSurface)
+                                .border(
+                                    width = if (isSelected) 2.dp else 1.dp,
+                                    color = if (isSelected) accentColor else DarkBorder,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
                                 .clickable {
-                                    throttleProfile = prof
-                                    onUpdateComfortSettings(reverseBuzzer, drlMode, headlightDelay, cruiseStep, throttleProfile)
+                                    throttleProfile = mode.title
+                                    onUpdateDrivingMode(mode.title)
+                                    onUpdateComfortSettings(reverseBuzzer, drlMode, headlightDelay, cruiseStep, mode.title)
                                 }
-                                .padding(vertical = 8.dp, horizontal = 4.dp),
+                                .padding(vertical = 12.dp, horizontal = 4.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = prof,
-                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                                color = if (selected) Color.Black else TextSecondary,
-                                maxLines = 1
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = accentColor,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                    }
+                                    Text(
+                                        text = mode.title,
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = if (isSelected) accentColor else TextPrimary,
+                                        maxLines = 1
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = mode.subtitle,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                    color = if (isSelected) accentColor.copy(alpha = 0.85f) else TextMuted,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Detail Explanation Banner for Active Mode
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(DarkSurface)
+                        .border(1.dp, DarkBorder, RoundedCornerShape(10.dp))
+                        .padding(12.dp)
+                ) {
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val activeColor = when (activeMode) {
+                                DrivingMode.BALANCED -> TelemetryCyan
+                                DrivingMode.ECO -> GaugeGreen
+                                DrivingMode.HEAVY -> SitrakOrange
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(activeColor, CircleShape)
                             )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Активен режим: ${activeMode.title} (${activeMode.subtitle})",
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                color = activeColor
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = activeMode.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+
+                        if (isWritingCalibration) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = SitrakOrange
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Запись параметров в ЭБУ Bosch EDC17 и TraXon...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = SitrakOrange
+                                )
+                            }
                         }
                     }
                 }

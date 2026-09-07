@@ -77,6 +77,43 @@ data class LiveTelemetry(
     val parkingBrakeActive: Boolean = true
 )
 
+enum class DrivingMode(
+    val title: String,
+    val subtitle: String,
+    val udsCode: String,
+    val description: String
+) {
+    BALANCED(
+        title = "Сбалансированный",
+        subtitle = "Стандарт",
+        udsCode = "01",
+        description = "Заводская балансировка мощности и расхода топлива"
+    ),
+    ECO(
+        title = "Экономичный",
+        subtitle = "Эко",
+        udsCode = "02",
+        description = "Плавный отклик дросселя, ранние переключения TraXon (экономия 10-15%)"
+    ),
+    HEAVY(
+        title = "Тяжёлый",
+        subtitle = "Тяжелый груз",
+        udsCode = "03",
+        description = "Полный крутящий момент 2500 Нм, динамичный наддув для 44-60 т"
+    );
+
+    companion object {
+        fun fromString(value: String): DrivingMode {
+            val lower = value.lowercase()
+            return when {
+                lower.contains("экон") || lower.contains("эко") || lower.contains("eco") -> ECO
+                lower.contains("тяж") || lower.contains("power") || lower.contains("heavy") -> HEAVY
+                else -> BALANCED
+            }
+        }
+    }
+}
+
 data class TruckConfiguration(
     val speedLimitKmH: Int = 90,
     val idleRpm: Int = 600,
@@ -84,7 +121,7 @@ data class TruckConfiguration(
     val drlMode: String = "Автоматические ДХО",
     val headlightDelaySec: Int = 30,
     val cruiseStepKmH: Int = 1,
-    val throttleProfile: String = "Стандарт",
+    val throttleProfile: String = "Сбалансированный",
     val adBlueDerateReset: Boolean = true,
     val dpfRegenInProgress: Boolean = false,
     val dpfRegenProgressPct: Int = 0
