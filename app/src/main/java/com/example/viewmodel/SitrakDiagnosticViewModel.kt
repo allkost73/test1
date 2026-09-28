@@ -74,6 +74,9 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     private val _isWritingCalibration = MutableStateFlow(false)
     val isWritingCalibration: StateFlow<Boolean> = _isWritingCalibration.asStateFlow()
 
+    private val _isCalibratingSteering = MutableStateFlow(false)
+    val isCalibratingSteering: StateFlow<Boolean> = _isCalibratingSteering.asStateFlow()
+
     private val _selectedModuleFilter = MutableStateFlow<TruckModule?>(null)
     val selectedModuleFilter: StateFlow<TruckModule?> = _selectedModuleFilter.asStateFlow()
 
@@ -322,6 +325,50 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     fun adjustVoltageStep(delta: Float) {
         val msg = elmManager.adjustVoltageStep(delta)
         _statusNotice.value = msg
+    }
+
+    // Steering Angle Sensor (SAS / WABCO EBS ESP) Calibration APIs
+    fun calibrateSteeringZero() {
+        viewModelScope.launch {
+            _isCalibratingSteering.value = true
+            _statusNotice.value = "Запуск калибровки нуля датчика угла руля (UDS Routine 31 01 02 01 -> WABCO EBS)..."
+            val result = elmManager.calibrateSteeringAngleZero()
+            _isCalibratingSteering.value = false
+
+            when (result) {
+                is CalibrationResult.Success -> {
+                    _statusNotice.value = result.message
+                }
+                is CalibrationResult.SecurityLocked -> {
+                    _calibrationDialogMessage.value = result.message
+                    _statusNotice.value = "Блок EBS отклонил калибровку: требуется Security Access"
+                }
+                is CalibrationResult.ConditionsNotMet -> {
+                    _calibrationDialogMessage.value = result.message
+                    _statusNotice.value = "Условия не выполнены: поставьте руль прямо и затяните ручник."
+                }
+                is CalibrationResult.NoResponse -> {
+                    _statusNotice.value = result.message
+                }
+                is CalibrationResult.Error -> {
+                    _statusNotice.value = result.message
+                }
+            }
+        }
+    }
+
+    fun resetSteeringCalibration() {
+        val msg = elmManager.resetSteeringCalibration()
+        _statusNotice.value = msg
+    }
+
+    fun adjustSteeringOffset(deltaDeg: Float) {
+        val msg = elmManager.adjustSteeringAngleOffset(deltaDeg)
+        _statusNotice.value = msg
+    }
+
+    fun setSimulatedSteeringAngle(angleDeg: Float) {
+        elmManager.setSimulatedSteeringAngle(angleDeg)
     }
 
     fun triggerDpfRegeneration() {

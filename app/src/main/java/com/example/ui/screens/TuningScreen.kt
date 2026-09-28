@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,11 +23,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.LocalFireDepartment
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -52,13 +56,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.abs
 import com.example.model.DrivingMode
 import com.example.model.LiveTelemetry
 import com.example.model.TruckConfiguration
@@ -92,11 +102,17 @@ fun TuningScreen(
     onResetVoltageCalibration: () -> Unit = {},
     onAdjustVoltageStep: (Float) -> Unit = {},
     onUpdateDrivingMode: (String) -> Unit = {},
+    isCalibratingSteering: Boolean = false,
+    onCalibrateSteeringZero: () -> Unit = {},
+    onResetSteeringCalibration: () -> Unit = {},
+    onAdjustSteeringOffset: (Float) -> Unit = {},
+    onSimulateSteeringAngle: (Float) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var tempSpeedLimit by remember(truckConfig.speedLimitKmH) { mutableFloatStateOf(truckConfig.speedLimitKmH.toFloat()) }
     var tempIdleRpm by remember(truckConfig.idleRpm) { mutableFloatStateOf(truckConfig.idleRpm.toFloat()) }
     var manualVoltText by remember { mutableStateOf("") }
+    var steerSimSlider by remember(telemetry.steeringAngleDeg) { mutableFloatStateOf(telemetry.steeringAngleDeg) }
 
     var reverseBuzzer by remember(truckConfig.reverseBuzzer) { mutableStateOf(truckConfig.reverseBuzzer) }
     var drlMode by remember(truckConfig.drlMode) { mutableStateOf(truckConfig.drlMode) }
@@ -296,6 +312,384 @@ fun TuningScreen(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .clickable { onResetVoltageCalibration() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        }
+
+        // Section 1: Steering Angle Sensor Calibration (Калибровка датчика угла поворота руля SAS / WABCO EBS ESP)
+        item {
+            val absAngle = abs(telemetry.steeringAngleDeg)
+            val isAngleInZeroZone = absAngle <= 1.5f
+            val isAngleInSafeTolerance = absAngle <= 10.0f
+            val canExecuteCalibration = !isCalibratingSteering && telemetry.parkingBrakeActive && isAngleInSafeTolerance
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(DarkSurfaceElevated)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(16.dp))
+                    .padding(16.dp)
+                    .testTag("card_steering_calibration")
+            ) {
+                // Header Row with Icon, Title, Status & Big Readout
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = null,
+                            tint = TelemetryCyan
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = "Калибровка датчика угла руля (SAS)",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = if (telemetry.isSteeringCalibrated) "Нулевая точка зафиксирована (0.0° ОК)" else "Требуется калибровка нулевой точки",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (telemetry.isSteeringCalibrated) GaugeGreen else GaugeYellow
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = String.format(Locale.US, "%+.1f°", telemetry.steeringAngleDeg),
+                        style = MaterialTheme.typography.headlineSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        ),
+                        color = when {
+                            isAngleInZeroZone -> GaugeGreen
+                            isAngleInSafeTolerance -> GaugeYellow
+                            else -> GaugeRed
+                        }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Interactive Rotating Steering Wheel Component
+                SteeringWheelVisualizer(
+                    angleDeg = telemetry.steeringAngleDeg,
+                    isCalibrated = telemetry.isSteeringCalibrated,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Diagnostic Readings Grid
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(DarkSurface)
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Сырой сигнал датчика SAS (до смещения):",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
+                        )
+                        Text(
+                            text = String.format(Locale.US, "%+.1f°", telemetry.rawSteeringAngleDeg),
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            color = TextPrimary
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Калибровочное смещение нуля (Offset):",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
+                        )
+                        Text(
+                            text = String.format(Locale.US, "%+.1f°", telemetry.steeringCalibrationOffsetDeg),
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            color = TelemetryCyan
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Блок управления и протокол шины CAN:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
+                        )
+                        Text(
+                            text = "WABCO EBS (0x0B / 18DA0BF1)",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.SemiBold
+                            ),
+                            color = GaugeGreen
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Зона допуска нуля прямолинейного хода:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
+                        )
+                        Text(
+                            text = if (isAngleInZeroZone) "В допуске ([-1.5° ... +1.5°])" else "Отклонение от центра",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold
+                            ),
+                            color = if (isAngleInZeroZone) GaugeGreen else GaugeYellow
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Interactive Steering Wheel Slider & Angle Presets for Testing & Simulator
+                Text(
+                    text = "Проверка вращения руля и отклика датчика:",
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = TextSecondary
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Slider(
+                    value = steerSimSlider.coerceIn(-90f, 90f),
+                    onValueChange = {
+                        steerSimSlider = it
+                        onSimulateSteeringAngle(it)
+                    },
+                    valueRange = -90f..90f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = TelemetryCyan,
+                        activeTrackColor = TelemetryCyan,
+                        inactiveTrackColor = Color(0xFF262C36)
+                    ),
+                    modifier = Modifier.fillMaxWidth().testTag("slider_steering_angle")
+                )
+
+                // Quick Angle Buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(-45f to "-45°", -15f to "-15°", 0.0f to "0° Прямо", 15f to "+15°", 45f to "+45°").forEach { (angle, label) ->
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (abs(telemetry.steeringAngleDeg - angle) < 1.0f) TelemetryCyan else Color(0xFF21262D))
+                                .clickable {
+                                    steerSimSlider = angle
+                                    onSimulateSteeringAngle(angle)
+                                }
+                                .padding(vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = if (abs(telemetry.steeringAngleDeg - angle) < 1.0f) Color.Black else TextSecondary,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Pre-calibration Checklist
+                Text(
+                    text = "Контроль условий перед калибровкой:",
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = TextPrimary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(DarkSurface)
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // Check 1: Stationary
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = GaugeGreen,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "1. Автомобиль неподвижен (Скорость: 0 км/ч)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextPrimary
+                        )
+                    }
+
+                    // Check 2: Parking Brake
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (telemetry.parkingBrakeActive) Icons.Default.CheckCircle else Icons.Default.Cancel,
+                            contentDescription = null,
+                            tint = if (telemetry.parkingBrakeActive) GaugeGreen else GaugeRed,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (telemetry.parkingBrakeActive) "2. Стояночный тормоз ВКЛЮЧЕН (Ручник активен)" else "2. ВНИМАНИЕ: Затяните стояночный тормоз!",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (telemetry.parkingBrakeActive) TextPrimary else GaugeRed
+                        )
+                    }
+
+                    // Check 3: Straight Wheel Alignment
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (isAngleInSafeTolerance) Icons.Default.CheckCircle else Icons.Default.Cancel,
+                            contentDescription = null,
+                            tint = if (isAngleInSafeTolerance) GaugeGreen else GaugeYellow,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isAngleInSafeTolerance) "3. Руль выставлен прямо (допуск: ${String.format(Locale.US, "%.1f°", absAngle)} < 10°)" else "3. Выставьте рулевое колесо строго по центру (отклонение ${String.format(Locale.US, "%.1f°", absAngle)} > 10°)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isAngleInSafeTolerance) TextPrimary else GaugeYellow
+                        )
+                    }
+
+                    // Check 4: CAN connection
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = GaugeGreen,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "4. Связь с блоком WABCO EBS (CAN-шина активна)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextPrimary
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Primary Calibration Action Button
+                Button(
+                    onClick = onCalibrateSteeringZero,
+                    enabled = canExecuteCalibration,
+                    colors = ButtonDefaults.buttonColors(containerColor = TelemetryCyan),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("btn_calibrate_steering")
+                ) {
+                    if (isCalibratingSteering) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = Color.Black,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Калибровка Routine 31 01 02 01 в EBS...", color = Color.Black, fontWeight = FontWeight.Bold)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = null,
+                            tint = Color.Black,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Зафиксировать нулевую точку руля (0.0° SAS)", color = Color.Black, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Micro Step Adjustments (-1.0, -0.2, +0.2, +1.0)
+                Text(
+                    text = "Тонкая подгонка нуля шагом:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(-1.0f to "-1.0°", -0.2f to "-0.2°", 0.2f to "+0.2°", 1.0f to "+1.0°").forEach { (delta, label) ->
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF21262D))
+                                .clickable { onAdjustSteeringOffset(delta) }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Footer with explanation and Reset to factory
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Допуск нуля: ±1.5° (WABCO ESP SPN 1807)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted
+                    )
+
+                    Text(
+                        text = "Сбросить к заводской",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = TelemetryCyan,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { onResetSteeringCalibration() }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
@@ -864,6 +1258,179 @@ fun TuningScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun SteeringWheelVisualizer(
+    angleDeg: Float,
+    isCalibrated: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val absAngle = abs(angleDeg)
+    val angleColor = when {
+        absAngle <= 1.5f -> GaugeGreen
+        absAngle <= 10.0f -> GaugeYellow
+        else -> GaugeRed
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(200.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.size(190.dp)) {
+            val center = this.center
+            val radius = size.minDimension / 2f - 12.dp.toPx()
+            val rimStroke = 14.dp.toPx()
+
+            // 1. Static Reference Elements
+            // Top Absolute Zero Notch Marker
+            drawLine(
+                color = GaugeGreen.copy(alpha = 0.85f),
+                start = Offset(center.x, center.y - radius - 10.dp.toPx()),
+                end = Offset(center.x, center.y - radius + 10.dp.toPx()),
+                strokeWidth = 3.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+
+            // Safe Zero Zone Sector Arc ([-1.5° .. +1.5°], centered at 270°)
+            drawArc(
+                color = GaugeGreen.copy(alpha = 0.35f),
+                startAngle = 270f - 1.5f,
+                sweepAngle = 3.0f,
+                useCenter = false,
+                topLeft = Offset(center.x - radius, center.y - radius),
+                size = Size(radius * 2, radius * 2),
+                style = Stroke(width = rimStroke + 6.dp.toPx(), cap = StrokeCap.Round)
+            )
+
+            // Dynamic Angular Sweep Arc from 0° (270°) to current angle
+            if (absAngle > 0.5f) {
+                val clampedSweep = angleDeg.coerceIn(-180f, 180f)
+                drawArc(
+                    color = angleColor.copy(alpha = 0.6f),
+                    startAngle = 270f,
+                    sweepAngle = clampedSweep,
+                    useCenter = false,
+                    topLeft = Offset(center.x - radius, center.y - radius),
+                    size = Size(radius * 2, radius * 2),
+                    style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round)
+                )
+            }
+
+            // 2. Rotating Steering Wheel
+            rotate(degrees = angleDeg, pivot = center) {
+                // Outer Rim base
+                drawCircle(
+                    color = Color(0xFF232832),
+                    radius = radius,
+                    center = center,
+                    style = Stroke(width = rimStroke)
+                )
+                // Rim outer highlight
+                drawCircle(
+                    color = DarkBorder,
+                    radius = radius + (rimStroke / 2),
+                    center = center,
+                    style = Stroke(width = 1.dp.toPx())
+                )
+                drawCircle(
+                    color = DarkBorder,
+                    radius = radius - (rimStroke / 2),
+                    center = center,
+                    style = Stroke(width = 1.dp.toPx())
+                )
+
+                // Top center zero notch on the rotating wheel rim
+                drawArc(
+                    color = SitrakOrange,
+                    startAngle = 265f,
+                    sweepAngle = 10f,
+                    useCenter = false,
+                    topLeft = Offset(center.x - radius, center.y - radius),
+                    size = Size(radius * 2, radius * 2),
+                    style = Stroke(width = rimStroke, cap = StrokeCap.Butt)
+                )
+
+                // Spokes (3 Spokes: Left 180°, Right 0°, Bottom 90°)
+                val spokeWidth = 10.dp.toPx()
+                val hubRadius = 32.dp.toPx()
+
+                // Left Spoke
+                drawLine(
+                    color = Color(0xFF323945),
+                    start = Offset(center.x - hubRadius, center.y),
+                    end = Offset(center.x - radius + (rimStroke / 2), center.y),
+                    strokeWidth = spokeWidth,
+                    cap = StrokeCap.Round
+                )
+                // Right Spoke
+                drawLine(
+                    color = Color(0xFF323945),
+                    start = Offset(center.x + hubRadius, center.y),
+                    end = Offset(center.x + radius - (rimStroke / 2), center.y),
+                    strokeWidth = spokeWidth,
+                    cap = StrokeCap.Round
+                )
+                // Bottom Spoke
+                drawLine(
+                    color = Color(0xFF323945),
+                    start = Offset(center.x, center.y + hubRadius),
+                    end = Offset(center.x, center.y + radius - (rimStroke / 2)),
+                    strokeWidth = spokeWidth,
+                    cap = StrokeCap.Round
+                )
+
+                // Central Airbag Hub
+                drawCircle(
+                    color = Color(0xFF181C23),
+                    radius = hubRadius,
+                    center = center
+                )
+                drawCircle(
+                    color = DarkBorder,
+                    radius = hubRadius,
+                    center = center,
+                    style = Stroke(width = 1.5.dp.toPx())
+                )
+                // Emblem inner badge
+                drawCircle(
+                    color = SitrakOrange.copy(alpha = 0.25f),
+                    radius = hubRadius * 0.55f,
+                    center = center
+                )
+            }
+        }
+
+        // Center Digital Readout Overlay
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = String.format(Locale.US, "%+.1f°", angleDeg),
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontWeight = FontWeight.Black,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 15.sp
+                ),
+                color = angleColor
+            )
+            Text(
+                text = when {
+                    absAngle <= 1.5f -> "ЦЕНТР"
+                    angleDeg < 0 -> "ВЛЕВО"
+                    else -> "ВПРАВО"
+                },
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 8.sp
+                ),
+                color = angleColor
+            )
         }
     }
 }

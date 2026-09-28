@@ -106,15 +106,18 @@ fun ParametersScreen(
             )
         }
 
-        // Section: Pneumatic Braking System WABCO EBS
+        // Section: Braking System WABCO EBS & Steering SAS
         item {
+            val steerStatus = if (telemetry.isSteeringCalibrated) "Откалиброван (0.0° ОК)" else "Требуется калибровка"
             SensorGroupCard(
-                groupTitle = "3. Пневматическая тормозная система WABCO",
+                groupTitle = "3. Тормозная система WABCO EBS и рулевое (SAS)",
                 accentColor = GaugeGreen,
                 sensors = listOf(
-                    SensorItem("Давление в контуре 1 (SPN 1087)", String.format("%.1f бар", telemetry.brakeAirTank1Bar)),
-                    SensorItem("Давление в контуре 2 (SPN 1088)", String.format("%.1f бар", telemetry.brakeAirTank2Bar)),
+                    SensorItem("Давление в контуре 1 (SPN 1087)", String.format(java.util.Locale.US, "%.1f бар", telemetry.brakeAirTank1Bar)),
+                    SensorItem("Давление в контуре 2 (SPN 1088)", String.format(java.util.Locale.US, "%.1f бар", telemetry.brakeAirTank2Bar)),
                     SensorItem("Стояночный тормоз (Ручник)", if (telemetry.parkingBrakeActive) "АКТИВЕН (Заторможен)" else "ОТПУЩЕН"),
+                    SensorItem("Угол поворота руля (SAS SPN 1807)", String.format(java.util.Locale.US, "%+.1f°", telemetry.steeringAngleDeg)),
+                    SensorItem("Калибровка датчика угла руля", steerStatus),
                     SensorItem("Регулятор давления компрессора", "Сброс (9.0 бар)")
                 )
             )

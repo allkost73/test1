@@ -100,6 +100,14 @@ class Elm327Manager(private val context: Context) {
     var isVoltageCalibrated: Boolean = voltagePrefs.getBoolean("is_voltage_calibrated", false)
         private set
 
+    // Persistent Steering Angle Calibration (SAS / WABCO EBS ESP)
+    private val steeringPrefs = context.getSharedPreferences("sitrak_steering_prefs", Context.MODE_PRIVATE)
+    var steeringOffset: Float = steeringPrefs.getFloat("steering_offset", 0.0f)
+        private set
+    var isSteeringCalibrated: Boolean = steeringPrefs.getBoolean("is_steering_calibrated", false)
+        private set
+    private var simulatedSteeringAngle = -3.8f
+
     private val _lastRawVoltage = MutableStateFlow(27.6f)
     val lastRawVoltage: StateFlow<Float> = _lastRawVoltage.asStateFlow()
 
@@ -238,7 +246,11 @@ class Elm327Manager(private val context: Context) {
                 ecmModuleVoltage = 0f,
                 voltageCalibrationMultiplier = voltageMultiplier,
                 voltageCalibrationOffset = voltageOffset,
-                isVoltageCalibrated = isVoltageCalibrated
+                isVoltageCalibrated = isVoltageCalibrated,
+                steeringCalibrationOffsetDeg = steeringOffset,
+                isSteeringCalibrated = isSteeringCalibrated,
+                steeringAngleDeg = (0f + steeringOffset),
+                rawSteeringAngleDeg = 0f
             )
         }
     }
@@ -264,7 +276,11 @@ class Elm327Manager(private val context: Context) {
                     ecmModuleVoltage = 0f,
                     voltageCalibrationMultiplier = voltageMultiplier,
                     voltageCalibrationOffset = voltageOffset,
-                    isVoltageCalibrated = isVoltageCalibrated
+                    isVoltageCalibrated = isVoltageCalibrated,
+                    steeringCalibrationOffsetDeg = steeringOffset,
+                    isSteeringCalibrated = isSteeringCalibrated,
+                    steeringAngleDeg = (0f + steeringOffset),
+                    rawSteeringAngleDeg = 0f
                 )
 
                 val adapter = bluetoothAdapter
@@ -541,6 +557,8 @@ class Elm327Manager(private val context: Context) {
                 val oilFlutter = baseOil + (Random.nextFloat() - 0.5f) * 0.12f
                 val air1 = 8.4f + (Random.nextFloat() - 0.5f) * 0.1f
                 val air2 = 8.2f + (Random.nextFloat() - 0.5f) * 0.1f
+                val currentRawSteering = simulatedSteeringAngle + ((Random.nextFloat() - 0.5f) * 0.12f)
+                val effectiveSteering = currentRawSteering + steeringOffset
 
                 _telemetry.value = _telemetry.value.copy(
                     rpm = targetRpm,
@@ -549,7 +567,11 @@ class Elm327Manager(private val context: Context) {
                     boostPressureBar = boostFlutter,
                     oilPressureBar = oilFlutter,
                     brakeAirTank1Bar = air1,
-                    brakeAirTank2Bar = air2
+                    brakeAirTank2Bar = air2,
+                    steeringAngleDeg = effectiveSteering,
+                    rawSteeringAngleDeg = currentRawSteering,
+                    steeringCalibrationOffsetDeg = steeringOffset,
+                    isSteeringCalibrated = isSteeringCalibrated
                 )
 
                 delay(300)
@@ -871,6 +893,11 @@ class Elm327Manager(private val context: Context) {
             upper.startsWith("19") -> "59 02 FF 02 38 28 20 4F 29"
             upper == "04" -> "44"
             upper.startsWith("14") -> "54"
+            upper.startsWith("31 01 02 01") || upper.startsWith("31 01 05 00") -> "71 01 02 01 00"
+            upper.startsWith("22 02 00") || upper.startsWith("22 18 07") -> {
+                val rawDeg = ((_telemetry.value.steeringAngleDeg * 10).toInt() and 0xFFFF)
+                String.format(Locale.US, "62 02 00 %02X %02X", (rawDeg shr 8) and 0xFF, rawDeg and 0xFF)
+            }
             upper.startsWith("22") -> "62 11 A0 03 F8 12"
             upper.startsWith("2E") -> "6E"
             upper.startsWith("31") -> "71 01"
@@ -1045,6 +1072,120 @@ class Elm327Manager(private val context: Context) {
         val current = _telemetry.value.batteryVoltage
         val target = (current + delta).coerceIn(10f, 36f)
         return calibrateVoltage(target)
+    }
+
+    // Steering Angle Sensor Calibration APIs (SAS / WABCO EBS ESP)
+    fun setSimulatedSteeringAngle(angleDeg: Float) {
+        simulatedSteeringAngle = angleDeg - steeringOffset
+        val eff = simulatedSteeringAngle + steeringOffset
+        _telemetry.value = _telemetry.value.copy(
+            steeringAngleDeg = eff,
+            rawSteeringAngleDeg = simulatedSteeringAngle,
+            steeringCalibrationOffsetDeg = steeringOffset,
+            isSteeringCalibrated = isSteeringCalibrated
+        )
+    }
+
+    suspend fun calibrateSteeringAngleZero(): CalibrationResult {
+        if (_isSimulationMode.value) {
+            delay(500)
+            logTerminal("31 01 02 01", "71 01 02 01 00", true)
+            val currentRaw = _telemetry.value.rawSteeringAngleDeg
+            steeringOffset = -currentRaw
+            isSteeringCalibrated = true
+            steeringPrefs.edit()
+                .putFloat("steering_offset", steeringOffset)
+                .putBoolean("is_steering_calibrated", true)
+                .apply()
+
+            _telemetry.value = _telemetry.value.copy(
+                steeringAngleDeg = 0.0f,
+                steeringCalibrationOffsetDeg = steeringOffset,
+                isSteeringCalibrated = true
+            )
+            return CalibrationResult.Success("Датчик угла поворота руля SAS (WABCO EBS) успешно откалиброван в 0.0°! Нулевая точка зафиксирована.")
+        }
+
+        if (bluetoothSocket?.isConnected != true) {
+            return CalibrationResult.NoResponse("Нет подключения к адаптеру ELM327 по Bluetooth.")
+        }
+
+        return try {
+            // Target WABCO EBS module (18DA0BF1 or 7E2)
+            val header = if (activeCan29Bit) TruckModule.EBS.can29Header else TruckModule.EBS.canId
+            sendRawCommandInternal("ATSH $header")
+            delay(60)
+
+            // Diagnostic Session 10 03 (Extended Diagnostic Session)
+            val sessionResp = sendRawCommandInternal("10 03")
+            logTerminal("10 03 ($header)", sessionResp, isPositiveObdOrCanResponse(sessionResp))
+            delay(80)
+
+            // Routine Control 31 01 02 01 (Steering Angle Sensor Zero Calibration)
+            val cmd = "31 01 02 01"
+            val resp = sendRawCommandInternal(cmd)
+            val isSuccess = resp.contains("71 01") || resp.contains("OK") || resp.contains("6E")
+            logTerminal(cmd, resp, isSuccess)
+
+            if (isSuccess) {
+                val currentRaw = _telemetry.value.rawSteeringAngleDeg
+                steeringOffset = -currentRaw
+                isSteeringCalibrated = true
+                steeringPrefs.edit()
+                    .putFloat("steering_offset", steeringOffset)
+                    .putBoolean("is_steering_calibrated", true)
+                    .apply()
+
+                _telemetry.value = _telemetry.value.copy(
+                    steeringAngleDeg = 0.0f,
+                    steeringCalibrationOffsetDeg = steeringOffset,
+                    isSteeringCalibrated = true
+                )
+                CalibrationResult.Success("Калибровка датчика угла руля WABCO EBS успешно выполнена (ответ: $resp). Нулевая точка 0.0° зафиксирована в блоке.")
+            } else if (resp.contains("7F 31 22") || resp.contains("7F 31 31") || resp.contains("Conditions")) {
+                CalibrationResult.ConditionsNotMet("Условия калибровки не выполнены (ответ: $resp). Убедитесь, что стояночный тормоз включен, автомобиль неподвижен (0 км/ч), колеса стоят строго прямо, и зажигание включено.")
+            } else if (resp.contains("7F 31 33") || resp.contains("Security")) {
+                CalibrationResult.SecurityLocked("Блок WABCO EBS отклонил калибровку: требуется уровень доступа Security Access (Seed & Key).")
+            } else {
+                CalibrationResult.Error("Ответ блока WABCO EBS: $resp")
+            }
+        } catch (e: Exception) {
+            CalibrationResult.Error("Ошибка калибровки SAS: ${e.localizedMessage}")
+        }
+    }
+
+    fun adjustSteeringAngleOffset(deltaDeg: Float): String {
+        steeringOffset += deltaDeg
+        isSteeringCalibrated = true
+        steeringPrefs.edit()
+            .putFloat("steering_offset", steeringOffset)
+            .putBoolean("is_steering_calibrated", true)
+            .apply()
+
+        val eff = _telemetry.value.rawSteeringAngleDeg + steeringOffset
+        _telemetry.value = _telemetry.value.copy(
+            steeringAngleDeg = eff,
+            steeringCalibrationOffsetDeg = steeringOffset,
+            isSteeringCalibrated = true
+        )
+        return String.format(Locale.US, "Смещение нуля скорректировано на %+.1f° (Угол: %+.1f°)", deltaDeg, eff)
+    }
+
+    fun resetSteeringCalibration(): String {
+        steeringOffset = 0.0f
+        isSteeringCalibrated = false
+        steeringPrefs.edit()
+            .putFloat("steering_offset", 0.0f)
+            .putBoolean("is_steering_calibrated", false)
+            .apply()
+
+        val eff = _telemetry.value.rawSteeringAngleDeg
+        _telemetry.value = _telemetry.value.copy(
+            steeringAngleDeg = eff,
+            steeringCalibrationOffsetDeg = 0.0f,
+            isSteeringCalibrated = false
+        )
+        return "Калибровка датчика угла поворота руля сброшена к заводским значениям."
     }
 
     // UDS Diagnostic Service 2E (WriteDataByIdentifier) with Session Control & Header targeting

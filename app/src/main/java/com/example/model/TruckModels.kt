@@ -74,8 +74,25 @@ data class LiveTelemetry(
     val dpfSootLoadPct: Float = 34f,
     val engineLoadPct: Float = 18f,
     val intakeAirTempC: Float = 24f,
-    val parkingBrakeActive: Boolean = true
+    val parkingBrakeActive: Boolean = true,
+    // Датчик угла поворота рулевого колеса (SAS / WABCO EBS ESP)
+    val steeringAngleDeg: Float = 0.0f, // Текущий угол рулевого колеса в градусах (-900°..+900°)
+    val rawSteeringAngleDeg: Float = -3.8f, // Сырой сигнал с датчика SAS до калибровочного смещения
+    val steeringAngularSpeedDegS: Float = 0.0f, // Угловая скорость вращения руля (°/с)
+    val steeringCalibrationOffsetDeg: Float = 0.0f, // Сохраненное калибровочное смещение нуля
+    val isSteeringCalibrated: Boolean = false // Флаг успешной калибровки нуля
 )
+
+data class SteeringCalibrationCheck(
+    val isStationary: Boolean = true, // Скорость 0 км/ч
+    val isParkingBrakeActive: Boolean = true, // Ручник затянут
+    val isAngleWithinSafeRange: Boolean = true, // Руль выставлен в районе нуля (±10°)
+    val isSteeringStill: Boolean = true, // Руль неподвижен (< 1.5°/с)
+    val isEbsOnline: Boolean = true // Блок EBS отвечает по шине CAN
+) {
+    val canCalibrate: Boolean
+        get() = isStationary && isParkingBrakeActive && isAngleWithinSafeRange && isSteeringStill && isEbsOnline
+}
 
 enum class DrivingMode(
     val title: String,

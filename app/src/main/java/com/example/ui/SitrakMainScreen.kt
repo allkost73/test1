@@ -126,6 +126,7 @@ fun SitrakMainScreen(
     val isDiagnosingEcus by viewModel.isDiagnosingEcus.collectAsState()
     val calibrationDialogMessage by viewModel.calibrationDialogMessage.collectAsState()
     val isWritingCalibration by viewModel.isWritingCalibration.collectAsState()
+    val isCalibratingSteering by viewModel.isCalibratingSteering.collectAsState()
     val hasScannedRealTruck by viewModel.hasScannedRealTruck.collectAsState()
 
     // Bluetooth Permissions Launcher for Android 12+ and Android <= 11
@@ -241,7 +242,12 @@ fun SitrakMainScreen(
                     onCalibrateVoltage = { viewModel.calibrateVoltage(it) },
                     onResetVoltageCalibration = { viewModel.resetVoltageCalibration() },
                     onAdjustVoltageStep = { viewModel.adjustVoltageStep(it) },
-                    onUpdateDrivingMode = { viewModel.updateDrivingMode(it) }
+                    onUpdateDrivingMode = { viewModel.updateDrivingMode(it) },
+                    isCalibratingSteering = isCalibratingSteering,
+                    onCalibrateSteeringZero = { viewModel.calibrateSteeringZero() },
+                    onResetSteeringCalibration = { viewModel.resetSteeringCalibration() },
+                    onAdjustSteeringOffset = { viewModel.adjustSteeringOffset(it) },
+                    onSimulateSteeringAngle = { viewModel.setSimulatedSteeringAngle(it) }
                 )
 
                 DiagnosticTab.TERMINAL -> TerminalScreen(
