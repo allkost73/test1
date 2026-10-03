@@ -20,15 +20,22 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ElectricMeter
 import androidx.compose.material.icons.filled.LocalGasStation
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -51,9 +58,12 @@ import com.example.model.DrivingMode
 import com.example.model.DtcCode
 import com.example.model.EcuModuleState
 import com.example.model.EcuStatus
+import com.example.model.ElmConnectionState
+import com.example.model.ElmProtocol
 import com.example.model.LiveTelemetry
 import com.example.model.TruckConfiguration
 import com.example.model.TruckModule
+import kotlin.math.abs
 import com.example.ui.components.CircularDialGauge
 import com.example.ui.components.LinearBarGauge
 import com.example.ui.theme.DarkBorder
@@ -80,6 +90,10 @@ fun DashboardScreen(
     detectedCanBus: String? = null,
     isSimulationMode: Boolean = false,
     onSelectDrivingMode: (String) -> Unit = {},
+    connectionState: ElmConnectionState = ElmConnectionState.Disconnected,
+    onDiagnoseEcusRequested: () -> Unit = {},
+    onToggleSimulation: (Boolean) -> Unit = {},
+    onSelectProtocol: (ElmProtocol) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val onlineEcuCount = ecuStates.values.count { it.status == EcuStatus.ONLINE }
@@ -323,76 +337,298 @@ fun DashboardScreen(
             }
         }
 
-        // ECU Link Status Strip (Mini Badges for ECM, TCU, EBS, SCR, CBCU)
+        // Connection & ECU Diagnostic Status Card
         item {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
+                    .clip(RoundedCornerShape(16.dp))
                     .background(DarkSurfaceElevated)
-                    .border(1.dp, DarkBorder, RoundedCornerShape(12.dp))
-                    .clickable { onNavigateTab(DiagnosticTab.DTC) }
-                    .padding(10.dp)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(16.dp))
+                    .padding(14.dp)
+                    .testTag("dashboard_ecu_status_card")
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Sensors,
-                            contentDescription = null,
-                            tint = SitrakOrange,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
+                when (connectionState) {
+                    is ElmConnectionState.Disconnected -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .background(GaugeRed, CircleShape)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Сканер ELM327 не подключен к Sitrak",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Блоки CAN:",
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                            color = TextPrimary
+                            text = "Для отображения приборов подключитесь к сканеру ELM327 Bluetooth в разъеме авто или запустите эмулятор.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
                         )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { onNavigateTab(DiagnosticTab.HISTORY) },
+                                colors = ButtonDefaults.buttonColors(containerColor = SitrakOrange),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(imageVector = Icons.Default.Bluetooth, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Подключить сканер", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                            OutlinedButton(
+                                onClick = { onToggleSimulation(true) },
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, tint = TelemetryCyan, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Включить демо", color = TextPrimary, fontSize = 12.sp)
+                            }
+                        }
                     }
 
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TruckModule.entries.forEach { module ->
-                            val state = ecuStates[module]
-                            val dotColor = when (state?.status) {
-                                EcuStatus.ONLINE -> GaugeGreen
-                                EcuStatus.OFFLINE -> GaugeRed
-                                else -> if (isSimulationMode) GaugeGreen else TextMuted
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .background(dotColor, CircleShape)
-                                )
-                                Spacer(modifier = Modifier.width(3.dp))
+                    is ElmConnectionState.Connecting -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = SitrakOrange,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
                                 Text(
-                                    text = module.code,
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold
-                                    ),
-                                    color = TextSecondary
+                                    text = "Подключение к автомобилю...",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = connectionState.step,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = SitrakOrange
                                 )
                             }
                         }
                     }
-                }
 
-                // If not connected to CAN or ECUs offline, show notice
-                if (!isSimulationMode && (onlineEcuCount == 0 || !isCanConnected)) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "⚠️ Блоки не отвечают. Включите зажигание Sitrak (Кл. 15). Нажмите для проверки.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = GaugeYellow
-                    )
+                    is ElmConnectionState.Error -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .background(GaugeRed, CircleShape)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Ошибка связи со сканером ELM327",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = GaugeRed
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = connectionState.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { onNavigateTab(DiagnosticTab.HISTORY) },
+                                colors = ButtonDefaults.buttonColors(containerColor = SitrakOrange),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text("Повторить подключение", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                            OutlinedButton(
+                                onClick = { onToggleSimulation(true) },
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text("Режим эмулятора", color = TextPrimary, fontSize = 12.sp)
+                            }
+                        }
+                    }
+
+                    is ElmConnectionState.Connected -> {
+                        // Header Row: Device info & Refresh action
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .background(GaugeGreen, CircleShape)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = if (connectionState.isSimulation) "Эмулятор Sitrak S7H (MC13)" else connectionState.deviceName,
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = detectedCanBus ?: connectionState.protocol,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TelemetryCyan
+                                    )
+                                }
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (connectionState.isSimulation) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(GaugeGreen.copy(alpha = 0.2f))
+                                            .border(1.dp, GaugeGreen.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text("ДЕМО", style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold), color = GaugeGreen)
+                                    }
+                                } else {
+                                    IconButton(
+                                        onClick = onDiagnoseEcusRequested,
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(imageVector = Icons.Default.Refresh, contentDescription = "Опросить блоки", tint = SitrakOrange)
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // ECU module state pills (ECM, TCU, EBS, SCR, CBCU)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            TruckModule.entries.forEach { module ->
+                                val state = ecuStates[module]
+                                val isOnline = state?.status == EcuStatus.ONLINE || (connectionState.isSimulation)
+                                val pillBg = if (isOnline) GaugeGreen.copy(alpha = 0.15f) else Color(0xFF21262D)
+                                val pillBorder = if (isOnline) GaugeGreen.copy(alpha = 0.6f) else DarkBorder
+                                val textColor = if (isOnline) GaugeGreen else TextMuted
+
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(pillBg)
+                                        .border(1.dp, pillBorder, RoundedCornerShape(8.dp))
+                                        .padding(vertical = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text(
+                                            text = module.code,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = textColor
+                                        )
+                                        Text(
+                                            text = if (isOnline) "В СЕТИ" else "НЕТ",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp),
+                                            color = textColor
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Offline ECU Warning Banner & Quick CAN Protocol Switcher
+                        if (!connectionState.isSimulation && (onlineEcuCount == 0 || !isCanConnected)) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(GaugeYellow.copy(alpha = 0.12f))
+                                    .border(1.dp, GaugeYellow.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+                                    .padding(10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = GaugeYellow, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Блоки Sitrak не отвечают на запросы CAN",
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = TextPrimary
+                                        )
+                                    }
+                                    Button(
+                                        onClick = onDiagnoseEcusRequested,
+                                        colors = ButtonDefaults.buttonColors(containerColor = SitrakOrange),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Icon(imageVector = Icons.Default.Refresh, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Опросить", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "1. Включите зажигание Sitrak (Кл. 15 24V).\n2. Убедитесь в надежном контакте разъема OBD-2.\n3. Переключите рабочий протокол CAN шины:",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                                    color = TextSecondary
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                // Quick Protocol Buttons (ISO 29/250k prioritized for Sitrak)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    listOf(
+                                        ElmProtocol.ISO_15765_29_250 to "ISO 29/250k",
+                                        ElmProtocol.ISO_15765_29_500 to "ISO 29/500k",
+                                        ElmProtocol.ISO_15765_11_500 to "ISO 11/500k",
+                                        ElmProtocol.AUTO to "АВТО",
+                                        ElmProtocol.J1939_250K to "J1939 250k"
+                                    ).forEach { (proto, label) ->
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color(0xFF21262D))
+                                                .border(1.dp, SitrakOrange.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                                                .clickable {
+                                                    onSelectProtocol(proto)
+                                                    onDiagnoseEcusRequested()
+                                                }
+                                                .padding(vertical = 6.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = label,
+                                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                                                color = SitrakOrange,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -595,6 +831,66 @@ fun DashboardScreen(
                         modifier = Modifier.weight(1f),
                         testTag = "gauge_battery"
                     )
+                }
+
+                // Steering Angle Sensor SAS Quick Tile on Dashboard
+                val absSteer = abs(telemetry.steeringAngleDeg)
+                val steerColor = when {
+                    absSteer <= 1.5f -> GaugeGreen
+                    absSteer <= 10f -> GaugeYellow
+                    else -> GaugeRed
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(DarkSurface)
+                        .border(1.dp, DarkBorder, RoundedCornerShape(12.dp))
+                        .clickable { onNavigateTab(DiagnosticTab.TUNING) }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "SAS",
+                            tint = TelemetryCyan,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = "Угол рулевого колеса (SAS):",
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = if (telemetry.isSteeringCalibrated) "Откалиброван (0.0° зафиксирован)" else "Требуется калибровка нуля",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (telemetry.isSteeringCalibrated) GaugeGreen else GaugeYellow
+                            )
+                        }
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = String.format(java.util.Locale.US, "%+.1f°", telemetry.steeringAngleDeg),
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Black,
+                                fontFamily = FontFamily.Monospace
+                            ),
+                            color = steerColor
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = TextMuted,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
             }
         }
