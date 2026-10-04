@@ -180,6 +180,7 @@ enum class ElmProtocol(
 
 sealed class ElmConnectionState {
     data object Disconnected : ElmConnectionState()
+    data object Disconnecting : ElmConnectionState()
     data class Connecting(val step: String) : ElmConnectionState()
     data class Connected(val deviceName: String, val protocol: String, val isSimulation: Boolean) : ElmConnectionState()
     data class Error(val message: String) : ElmConnectionState()

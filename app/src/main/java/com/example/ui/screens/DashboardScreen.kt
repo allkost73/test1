@@ -95,6 +95,7 @@ fun DashboardScreen(
     onToggleSimulation: (Boolean) -> Unit = {},
     onSelectProtocol: (ElmProtocol) -> Unit = {},
     onScanCanBus: () -> Unit = {},
+    onDisconnect: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val onlineEcuCount = ecuStates.values.count { it.status == EcuStatus.ONLINE }
@@ -400,24 +401,64 @@ fun DashboardScreen(
                     is ElmConnectionState.Connecting -> {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = SitrakOrange,
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = "Подключение к автомобилю...",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = connectionState.step,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = SitrakOrange
+                                    )
+                                }
+                            }
+                            Button(
+                                onClick = onDisconnect,
+                                colors = ButtonDefaults.buttonColors(containerColor = GaugeRed.copy(alpha = 0.85f)),
+                                shape = RoundedCornerShape(6.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text("Отмена", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    is ElmConnectionState.Disconnecting -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(20.dp),
-                                color = SitrakOrange,
+                                color = GaugeRed,
                                 strokeWidth = 2.dp
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                             Column {
                                 Text(
-                                    text = "Подключение к автомобилю...",
+                                    text = "Отключение адаптера...",
                                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                                     color = TextPrimary
                                 )
                                 Text(
-                                    text = connectionState.step,
+                                    text = "Сброс диагностических сессий и защита шины CAN Sitrak",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = SitrakOrange
+                                    color = TextSecondary
                                 )
                             }
                         }
@@ -489,7 +530,10 @@ fun DashboardScreen(
                                 }
                             }
 
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 if (connectionState.isSimulation) {
                                     Box(
                                         modifier = Modifier
@@ -507,6 +551,14 @@ fun DashboardScreen(
                                     ) {
                                         Icon(imageVector = Icons.Default.Refresh, contentDescription = "Опросить блоки", tint = SitrakOrange)
                                     }
+                                }
+                                Button(
+                                    onClick = onDisconnect,
+                                    colors = ButtonDefaults.buttonColors(containerColor = GaugeRed.copy(alpha = 0.85f)),
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Text("Отключить", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }

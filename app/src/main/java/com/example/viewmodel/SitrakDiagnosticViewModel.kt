@@ -106,6 +106,8 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     val boostHistory: StateFlow<List<Float>> = _boostHistory.asStateFlow()
 
     private var dpfJob: Job? = null
+    private var diagnosticJob: Job? = null
+    private var scanJob: Job? = null
 
     init {
         refreshPairedDevices()
@@ -188,9 +190,12 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     }
 
     fun disconnect() {
+        diagnosticJob?.cancel()
+        scanJob?.cancel()
         elmManager.disconnect()
         _activeFaults.value = emptyList()
         _hasScannedRealTruck.value = false
+        _statusNotice.value = "Адаптер отключен. Защита шины CAN выполнена."
     }
 
     fun setSimulationMode(enabled: Boolean) {
@@ -210,7 +215,8 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     }
 
     fun testAndDiagnoseEcus() {
-        viewModelScope.launch {
+        diagnosticJob?.cancel()
+        diagnosticJob = viewModelScope.launch {
             _statusNotice.value = "Диагностический опрос блоков Sitrak по шине CAN..."
             val results = elmManager.diagnoseAllEcus()
             val onlineCount = results.values.count { it.status == EcuStatus.ONLINE }
@@ -223,7 +229,8 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     }
 
     fun scanAllModules() {
-        viewModelScope.launch {
+        scanJob?.cancel()
+        scanJob = viewModelScope.launch {
             _isScanning.value = true
             val proto = elmManager.detectedCanBus.value ?: "CAN"
             _statusNotice.value = "Диагностика блоков Sitrak S7H по шине $proto..."

@@ -20,6 +20,7 @@ import com.example.model.ElmProtocol
 import com.example.model.LiveTelemetry
 import com.example.model.TerminalLogItem
 import com.example.model.TruckModule
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,6 +33,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.coroutineContext
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -196,7 +199,10 @@ class Elm327Manager(private val context: Context) {
     private var bluetoothSocket: BluetoothSocket? = null
     private var inputStream: InputStream? = null
     private var outputStream: OutputStream? = null
+    private var connectJob: Job? = null
     private var pollingJob: Job? = null
+    private var diagnoseJob: Job? = null
+    private var scanJob: Job? = null
     private var simJob: Job? = null
     private var receiverRegistered = false
 
@@ -233,11 +239,6 @@ class Elm327Manager(private val context: Context) {
                 }
             }
         }
-    }
-
-    init {
-        // Start simulation by default so user can immediately test and explore
-        startSimulationEngine()
     }
 
     fun isBluetoothAvailable(): Boolean = bluetoothAdapter != null
@@ -381,7 +382,12 @@ class Elm327Manager(private val context: Context) {
     }
 
     fun connectToDevice(deviceAddress: String, deviceName: String) {
-        scope.launch {
+        connectJob?.cancel()
+        pollingJob?.cancel()
+        diagnoseJob?.cancel()
+        simJob?.cancel()
+
+        connectJob = scope.launch {
             try {
                 simJob?.cancel()
                 _isSimulationMode.value = false
@@ -424,32 +430,42 @@ class Elm327Manager(private val context: Context) {
                 @SuppressLint("MissingPermission")
                 val device: BluetoothDevice = adapter.getRemoteDevice(deviceAddress)
 
+                if (!isActive) return@launch
+
                 // Try 4-tier connection fallback (Secure SPP -> Insecure SPP -> Channel 1 -> Insecure Channel 1)
                 val socket = establishSocketWithFallbacks(device, deviceName)
+                if (!isActive) {
+                    try { socket.close() } catch (_: Exception) {}
+                    return@launch
+                }
                 bluetoothSocket = socket
 
                 inputStream = socket.inputStream
                 outputStream = socket.outputStream
 
-                // Initialize ELM327 protocol
+                // Initialize ELM327 protocol safely
                 _connectionState.value = ElmConnectionState.Connecting("Инициализация чипа ELM327 (ATZ)...")
-                delay(150)
+                delay(120)
+                if (!isActive) return@launch
 
                 var initZ = sendRawCommandInternal("ATZ")
                 if (initZ == "NO DATA" || initZ.isEmpty()) {
-                    delay(250)
+                    delay(200)
+                    if (!isActive) return@launch
                     initZ = sendRawCommandInternal("ATZ")
                 }
 
-                _connectionState.value = ElmConnectionState.Connecting("Настройка параметров ELM327...")
+                _connectionState.value = ElmConnectionState.Connecting("Настройка параметров шины Sitrak...")
                 sendRawCommandInternal("ATE0") // Echo Off
                 sendRawCommandInternal("ATL0") // Linefeeds Off
                 sendRawCommandInternal("ATS1") // Spaces ON for clean byte parsing
                 sendRawCommandInternal("ATH0") // Headers OFF for universal OBD-II / UDS parsing
                 sendRawCommandInternal("ATAT1") // Adaptive Timing On
                 sendRawCommandInternal("ATCAF1") // CAN Auto-Formatting On
-                sendRawCommandInternal("ATST64") // 400ms timeout for truck ECUs
+                sendRawCommandInternal("ATST48") // 300ms timeout prevents hangs
+                sendRawCommandInternal("ATPC") // Clear any CAN error flags
 
+                if (!isActive) return@launch
                 _connectionState.value = ElmConnectionState.Connecting("Проверка напряжения сети 24V (ATRV)...")
                 val voltageResp = sendRawCommandInternal("ATRV")
                 val volt = parseVoltage(voltageResp)
@@ -457,10 +473,12 @@ class Elm327Manager(private val context: Context) {
                     _telemetry.value = _telemetry.value.copy(batteryVoltage = volt)
                 }
 
-                _connectionState.value = ElmConnectionState.Connecting("Автоопределение шины CAN Sitrak S7H/C7H...")
+                if (!isActive) return@launch
+                _connectionState.value = ElmConnectionState.Connecting("Безопасное подключение к CAN Sitrak 250k...")
                 val activeProto = autoDetectSitrakCanProtocol()
                 _detectedCanBus.value = activeProto
 
+                if (!isActive) return@launch
                 _connectionState.value = ElmConnectionState.Connected(
                     deviceName = deviceName,
                     protocol = activeProto,
@@ -470,23 +488,28 @@ class Elm327Manager(private val context: Context) {
                 logTerminal("INIT", "ELM327 сопряжен: $initZ | Сеть: $voltageResp | Протокол: $activeProto", true)
                 startPhysicalPolling()
 
-                // Diagnose ECUs asynchronously in background so dashboard is active immediately without 30s freeze!
-                scope.launch {
+                // Diagnose ECUs asynchronously in tracked job
+                diagnoseJob?.cancel()
+                diagnoseJob = scope.launch {
                     diagnoseAllEcus()
                 }
 
-            } catch (e: Exception) {
+            } catch (e: CancellationException) {
                 disconnectPhysical()
-                val userFriendlyMessage = when {
-                    e.message?.contains("Bluetooth выключен", ignoreCase = true) == true ->
-                        "Bluetooth выключен на телефоне. Включите Bluetooth."
-                    e.message?.contains("permission", ignoreCase = true) == true ->
-                        "Отсутствуют разрешения Bluetooth. Предоставьте доступ в настройках приложения."
-                    else ->
-                        "Сбой подключения к $deviceName: ${e.localizedMessage ?: "Таймаут сокета"}. Убедитесь, что зажигание Sitrak включено (24V) и сканер не занят другим приложением."
+            } catch (e: Exception) {
+                if (isActive) {
+                    disconnectPhysical()
+                    val userFriendlyMessage = when {
+                        e.message?.contains("Bluetooth выключен", ignoreCase = true) == true ->
+                            "Bluetooth выключен на телефоне. Включите Bluetooth."
+                        e.message?.contains("permission", ignoreCase = true) == true ->
+                            "Отсутствуют разрешения Bluetooth. Предоставьте доступ в настройках приложения."
+                        else ->
+                            "Сбой подключения к $deviceName: ${e.localizedMessage ?: "Таймаут сокета"}. Убедитесь, что зажигание Sitrak включено (24V) и сканер не занят другим приложением."
+                    }
+                    _connectionState.value = ElmConnectionState.Error(userFriendlyMessage)
+                    logTerminal("CONNECT", "Ошибка: ${e.message}", false)
                 }
-                _connectionState.value = ElmConnectionState.Error(userFriendlyMessage)
-                logTerminal("CONNECT", "Ошибка: ${e.message}", false)
             }
         }
     }
@@ -562,6 +585,7 @@ class Elm327Manager(private val context: Context) {
                     // Set CAN header to ECM (Engine Bosch EDC17CV44 / MC11-MC13)
                     val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
                     sendRawCommandInternal("ATSH $ecmHeader")
+                    delay(25)
 
                     // 1. Poll RPM (010C)
                     val rpmRaw = sendRawCommandInternal("010C")
@@ -573,7 +597,15 @@ class Elm327Manager(private val context: Context) {
                         _ignitionDetected.value = true
                     }
 
-                    // 2. Fast Steering Angle Sensor Polling (SAS from WABCO EBS or Steering Controller)
+                    if (rpmRaw.contains("CAN ERROR") || rpmRaw.contains("BUS BUSY")) {
+                        sendRawCommandInternal("ATPC")
+                        delay(250)
+                        continue
+                    }
+
+                    delay(30)
+
+                    // 2. Gentle Steering Angle Sensor Polling (SAS from WABCO EBS or Steering Controller)
                     var steerDeg = _telemetry.value.steeringAngleDeg
                     var rawSteer = _telemetry.value.rawSteeringAngleDeg
                     var physicalSasSuccess = false
@@ -589,46 +621,45 @@ class Elm327Manager(private val context: Context) {
                             if (detectedSasFilter != null) {
                                 sendRawCommandInternal("ATCRA $detectedSasFilter")
                             }
+                            delay(25)
                             val steerResp = sendRawCommandInternal("22 $detectedSasDid")
                             val parsed = parseSteeringAngle(steerResp)
                             if (parsed != null) {
                                 rawSteer = parsed
                                 steerDeg = rawSteer + steeringOffset
                                 physicalSasSuccess = true
-                            } else if (pollTick % 20 == 0) {
-                                // Redetect if link lost
+                            } else if (pollTick % 30 == 0) {
                                 detectedSasDid = null
                             }
-                        } else {
-                            // Probe standard WABCO EBS and SAS controller identifiers
+                        } else if (pollTick % 6 == 0) {
+                            // Gentle probe: only ONE candidate per probe interval, never flooding the CAN bus
                             val probeCandidates = listOf(
                                 Triple(ebsH, ebsF, "010A"),
                                 Triple(ebsH, ebsF, "0200"),
-                                Triple(ebsH, ebsF, "1807"),
                                 Triple(sasH, sasF, "010A"),
-                                Triple(sasH, sasF, "0200"),
-                                Triple(ebsH, ebsF, "F40E"),
-                                Triple(ebsH, ebsF, "0114")
+                                Triple(ebsH, ebsF, "1807")
                             )
-                            for ((h, f, did) in probeCandidates) {
-                                sendRawCommandInternal("ATSH $h")
-                                sendRawCommandInternal("ATCRA $f")
-                                val resp = sendRawCommandInternal("22 $did")
-                                val parsed = parseSteeringAngle(resp)
-                                if (parsed != null) {
-                                    detectedSasHeader = h
-                                    detectedSasFilter = f
-                                    detectedSasDid = did
-                                    rawSteer = parsed
-                                    steerDeg = rawSteer + steeringOffset
-                                    physicalSasSuccess = true
-                                    break
-                                }
+                            val candIndex = (pollTick / 6) % probeCandidates.size
+                            val (h, f, did) = probeCandidates[candIndex]
+                            sendRawCommandInternal("ATSH $h")
+                            sendRawCommandInternal("ATCRA $f")
+                            delay(25)
+                            val resp = sendRawCommandInternal("22 $did")
+                            val parsed = parseSteeringAngle(resp)
+                            if (parsed != null) {
+                                detectedSasHeader = h
+                                detectedSasFilter = f
+                                detectedSasDid = did
+                                rawSteer = parsed
+                                steerDeg = rawSteer + steeringOffset
+                                physicalSasSuccess = true
                             }
                         }
+
                         // Restore ECM header and clear CRA filter
                         sendRawCommandInternal("ATSH $ecmHeader")
                         sendRawCommandInternal("ATCRA")
+                        delay(25)
                     }
 
                     // If user recently nudged the steering wheel on screen and no physical CAN byte arrived, keep user value
@@ -640,18 +671,22 @@ class Elm327Manager(private val context: Context) {
                     // 3. Poll Speed (010D)
                     val speedRaw = sendRawCommandInternal("010D")
                     val speed = parseSpeed(speedRaw)
+                    delay(30)
 
                     // 4. Poll Coolant Temp (0105)
                     val tempRaw = sendRawCommandInternal("0105")
                     val temp = parseCoolant(tempRaw)
+                    delay(30)
 
                     // 5. Poll Boost / MAP (010B)
                     val mapRaw = sendRawCommandInternal("010B")
                     val boost = parseMap(mapRaw)
+                    delay(30)
 
                     // 6. Poll Rail Pressure (0123)
                     val railRaw = sendRawCommandInternal("0123")
                     val rail = parseRailPressure(railRaw)
+                    delay(30)
 
                     // 7. Poll ATRV (and 0142) periodically
                     var volt = 0f
@@ -660,6 +695,7 @@ class Elm327Manager(private val context: Context) {
                         val voltRaw = sendRawCommandInternal("ATRV")
                         volt = parseVoltage(voltRaw)
                         if (ecmResponded) {
+                            delay(25)
                             val ecuVoltRaw = sendRawCommandInternal("0142")
                             ecuVolt = parseModuleVoltage(ecuVoltRaw)
                         }
@@ -710,9 +746,10 @@ class Elm327Manager(private val context: Context) {
                         isSteeringCalibrated = isSteeringCalibrated
                     )
 
-                    delay(200)
+                    delay(300) // Paced 300ms polling allows full truck CAN bandwidth for instrument cluster!
                 } catch (e: Exception) {
-                    delay(800)
+                    if (e is CancellationException) break
+                    delay(500)
                 }
             }
         }
@@ -810,12 +847,12 @@ class Elm327Manager(private val context: Context) {
 
     suspend fun scanAndDetectCanBus(): String {
         if (_isSimulationMode.value) {
-            delay(300)
+            delay(200)
             _detectedCanBus.value = ElmProtocol.ISO_15765_29_250.displayName
             return ElmProtocol.ISO_15765_29_250.displayName
         }
 
-        logTerminal("SCAN", "Глубокое сканирование шины CAN Sitrak (перебор 250k / 500k)...", true)
+        logTerminal("SCAN", "Безопасное сканирование шины CAN Sitrak 250k...", true)
 
         data class ProtocolCandidate(
             val protocol: ElmProtocol,
@@ -825,8 +862,10 @@ class Elm327Manager(private val context: Context) {
             val physicalTargets: List<Pair<String, String>>
         )
 
+        // Sitrak C7H / G7 / C9H / HOWO trucks operate on 250 kbps CAN bus.
+        // We prioritize 29-bit 250k (ISO 15765-4 ATSP9 & SAE J1939 ATSPA).
         val candidates = listOf(
-            // 1. ISO 15765-4 CAN 29-bit / 250k (Default for Sitrak C7H / MC11 / MC13 / Bosch EDC17 / TraXon)
+            // 1. ISO 15765-4 CAN 29-bit / 250k (Universal for Sitrak / Bosch EDC17 / WABCO EBS)
             ProtocolCandidate(
                 protocol = ElmProtocol.ISO_15765_29_250,
                 atCmd = "ATSP9",
@@ -835,46 +874,10 @@ class Elm327Manager(private val context: Context) {
                 physicalTargets = listOf(
                     "18DA00F1" to "18DAF100", // ECM
                     "18DA21F1" to "18DAF121", // CBCU Gateway
-                    "18DA0BF1" to "18DAF10B", // EBS
-                    "18DA03F1" to "18DAF103"  // TCU TraXon
+                    "18DA0BF1" to "18DAF10B"  // EBS
                 )
             ),
-            // 2. ISO 15765-4 CAN 29-bit / 500k (High-speed bus on newer Sitrak S7H / C9H / WP12)
-            ProtocolCandidate(
-                protocol = ElmProtocol.ISO_15765_29_500,
-                atCmd = "ATSP7",
-                is29 = true,
-                bcast = "18DB33F1",
-                physicalTargets = listOf(
-                    "18DA00F1" to "18DAF100",
-                    "18DA21F1" to "18DAF121",
-                    "18DA0BF1" to "18DAF10B"
-                )
-            ),
-            // 3. ISO 15765-4 CAN 11-bit / 500k (Sitrak Cabin Gateway CBCU OBD-2 port)
-            ProtocolCandidate(
-                protocol = ElmProtocol.ISO_15765_11_500,
-                atCmd = "ATSP6",
-                is29 = false,
-                bcast = "7DF",
-                physicalTargets = listOf(
-                    "7E0" to "7E8", // ECM
-                    "7E3" to "7EB", // CBCU
-                    "7E2" to "7EA"  // EBS
-                )
-            ),
-            // 4. ISO 15765-4 CAN 11-bit / 250k
-            ProtocolCandidate(
-                protocol = ElmProtocol.ISO_15765_11_250,
-                atCmd = "ATSP8",
-                is29 = false,
-                bcast = "7DF",
-                physicalTargets = listOf(
-                    "7E0" to "7E8",
-                    "7E3" to "7EB"
-                )
-            ),
-            // 5. SAE J1939 CAN 29-bit / 250k
+            // 2. SAE J1939 CAN 29-bit / 250k
             ProtocolCandidate(
                 protocol = ElmProtocol.J1939_250K,
                 atCmd = "ATSPA",
@@ -884,25 +887,46 @@ class Elm327Manager(private val context: Context) {
                     "18DA00F1" to "18DAF100",
                     "18DA21F1" to "18DAF121"
                 )
+            ),
+            // 3. ISO 15765-4 CAN 11-bit / 250k (Secondary cabin port)
+            ProtocolCandidate(
+                protocol = ElmProtocol.ISO_15765_11_250,
+                atCmd = "ATSP8",
+                is29 = false,
+                bcast = "7DF",
+                physicalTargets = listOf(
+                    "7E0" to "7E8",
+                    "7E3" to "7EB"
+                )
             )
         )
 
         for (cand in candidates) {
+            if (!coroutineContext.isActive) break
             try {
-                sendRawCommandInternal("ATPC") // Clear adapter bus error state
+                sendRawCommandInternal("ATPC") // Clear error state on adapter
+                delay(30)
                 sendRawCommandInternal(cand.atCmd)
-                sendRawCommandInternal("ATST96") // 600ms timeout for slow truck gateways
-                sendRawCommandInternal("ATCRA") // Open receive filter (accept all)
-                delay(40)
+                sendRawCommandInternal("ATST32") // 200ms timeout per probe to avoid delays
+                sendRawCommandInternal("ATCRA") // Open receive filter
+                delay(30)
 
-                // 1. Probe Functional Broadcast (wakes up any responding node on bus)
+                // 1. Probe Functional Broadcast
                 sendRawCommandInternal("ATSH ${cand.bcast}")
                 var bcastResp = sendRawCommandInternal("0100")
+                if (bcastResp.contains("CAN ERROR") || bcastResp.contains("BUS BUSY")) {
+                    sendRawCommandInternal("ATPC")
+                    delay(50)
+                    continue // Immediately abort this candidate to protect vehicle CAN bus!
+                }
+
                 if (!isPositiveObdOrCanResponse(bcastResp)) {
                     bcastResp = sendRawCommandInternal("10 01")
-                }
-                if (!isPositiveObdOrCanResponse(bcastResp)) {
-                    bcastResp = sendRawCommandInternal("3E 00")
+                    if (bcastResp.contains("CAN ERROR") || bcastResp.contains("BUS BUSY")) {
+                        sendRawCommandInternal("ATPC")
+                        delay(50)
+                        continue
+                    }
                 }
 
                 if (isPositiveObdOrCanResponse(bcastResp)) {
@@ -911,29 +935,30 @@ class Elm327Manager(private val context: Context) {
                     _detectedCanBus.value = cand.protocol.displayName
                     _isCanConnected.value = true
                     _ignitionDetected.value = true
-                    val currentConn = _connectionState.value
-                    if (currentConn is ElmConnectionState.Connected) {
-                        _connectionState.value = currentConn.copy(protocol = cand.protocol.displayName)
-                    }
-                    logTerminal("CAN_OK", "Шина CAN определена (Broadcast): ${cand.protocol.displayName}, ответ: $bcastResp", true)
+                    sendRawCommandInternal("ATST64") // Restore standard 400ms timeout
+                    logTerminal("CAN_OK", "Шина CAN определена (Broadcast): ${cand.protocol.displayName}", true)
                     return cand.protocol.displayName
                 }
 
-                // 2. Probe Physical ECU Headers (ECM, CBCU Gateway, EBS) with dedicated ATCRA filter
+                // 2. Fast single physical probe on ECM / Gateway
                 for ((hdr, filter) in cand.physicalTargets) {
+                    if (!coroutineContext.isActive) break
                     sendRawCommandInternal("ATSH $hdr")
                     sendRawCommandInternal("ATCRA $filter")
-                    delay(30)
+                    delay(25)
 
                     var physResp = sendRawCommandInternal("10 01")
+                    if (physResp.contains("CAN ERROR") || physResp.contains("BUS BUSY")) {
+                        sendRawCommandInternal("ATPC")
+                        break // Stop probing this candidate
+                    }
+
                     if (!isPositiveObdOrCanResponse(physResp)) {
                         physResp = sendRawCommandInternal("0100")
-                    }
-                    if (!isPositiveObdOrCanResponse(physResp)) {
-                        physResp = sendRawCommandInternal("3E 00")
-                    }
-                    if (!isPositiveObdOrCanResponse(physResp)) {
-                        physResp = sendRawCommandInternal("010C")
+                        if (physResp.contains("CAN ERROR") || physResp.contains("BUS BUSY")) {
+                            sendRawCommandInternal("ATPC")
+                            break
+                        }
                     }
 
                     if (isPositiveObdOrCanResponse(physResp)) {
@@ -942,22 +967,23 @@ class Elm327Manager(private val context: Context) {
                         _detectedCanBus.value = cand.protocol.displayName
                         _isCanConnected.value = true
                         _ignitionDetected.value = true
-                        val currentConn = _connectionState.value
-                        if (currentConn is ElmConnectionState.Connected) {
-                            _connectionState.value = currentConn.copy(protocol = cand.protocol.displayName)
-                        }
-                        logTerminal("CAN_OK", "Шина CAN определена (ЭБУ $hdr): ${cand.protocol.displayName}, ответ: $physResp", true)
+                        sendRawCommandInternal("ATST64")
+                        logTerminal("CAN_OK", "Шина CAN определена (ЭБУ $hdr): ${cand.protocol.displayName}", true)
                         return cand.protocol.displayName
                     }
                 }
             } catch (e: Exception) {
-                logTerminal("CAN_SCAN", "Ошибка проверки ${cand.protocol.displayName}: ${e.message}", false)
+                if (e is CancellationException) throw e
+                logTerminal("CAN_SCAN", "Проверка ${cand.protocol.displayName}: ${e.message}", false)
             }
         }
 
-        // Default to ISO 15765-4 (29-bit / 250k - ATSP9) for Sitrak S7H / C7H
+        // Safe fallback: ISO 15765-4 (29-bit / 250k - ATSP9) for Sitrak
+        sendRawCommandInternal("ATPC")
         sendRawCommandInternal("ATSP9")
-        sendRawCommandInternal("ATSH 18DA00F1")
+        sendRawCommandInternal("ATST64")
+        val ecmHdr = "18DA00F1"
+        sendRawCommandInternal("ATSH $ecmHdr")
         sendRawCommandInternal("ATCRA")
         activeCan29Bit = true
         _detectedCanBus.value = ElmProtocol.ISO_15765_29_250.displayName
@@ -1217,9 +1243,11 @@ class Elm327Manager(private val context: Context) {
             val input = inputStream ?: throw IllegalStateException("Поток ввода Bluetooth недоступен")
 
             // Flush any stale bytes
-            while (input.available() > 0) {
-                input.read()
-            }
+            try {
+                while (input.available() > 0) {
+                    input.read()
+                }
+            } catch (_: Exception) {}
 
             val cmdBytes = "$command\r".toByteArray(Charsets.US_ASCII)
             out.write(cmdBytes)
@@ -1228,20 +1256,23 @@ class Elm327Manager(private val context: Context) {
             val sb = StringBuilder()
             val buffer = ByteArray(256)
             val startTime = System.currentTimeMillis()
-            val timeout = 2500L
+            val timeout = 1200L
 
             while (System.currentTimeMillis() - startTime < timeout) {
-                if (input.available() > 0) {
-                    val count = input.read(buffer)
+                if (!coroutineContext.isActive) break
+                val avail = try { input.available() } catch (_: Exception) { -1 }
+                if (avail < 0) break
+                if (avail > 0) {
+                    val count = try { input.read(buffer) } catch (_: Exception) { -1 }
                     if (count > 0) {
                         val text = String(buffer, 0, count, Charsets.US_ASCII)
                         sb.append(text)
                         if (text.contains(">")) {
                             break
                         }
-                    }
+                    } else break
                 } else {
-                    delay(20)
+                    delay(15)
                 }
             }
 
@@ -1321,18 +1352,48 @@ class Elm327Manager(private val context: Context) {
     }
 
     fun disconnect() {
-        disconnectPhysical()
+        _connectionState.value = ElmConnectionState.Disconnecting
+        connectJob?.cancel()
+        pollingJob?.cancel()
+        diagnoseJob?.cancel()
+        scanJob?.cancel()
         simJob?.cancel()
-        _connectionState.value = ElmConnectionState.Disconnected
+        isRoutineInProgress = false
+        _isDiagnosingEcus.value = false
+        _isSimulationMode.value = false
+        _isCanConnected.value = false
+        _ignitionDetected.value = false
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                disconnectPhysical()
+            } finally {
+                withContext(Dispatchers.Main) {
+                    _connectionState.value = ElmConnectionState.Disconnected
+                }
+            }
+        }
     }
 
     private fun disconnectPhysical() {
         pollingJob?.cancel()
+        // 1. Return ECUs to default session and reset adapter to release truck CAN bus
+        try {
+            val out = outputStream
+            if (out != null) {
+                val bcastHdr = if (activeCan29Bit) "18DB33F1" else "7DF"
+                out.write("ATSH $bcastHdr\r10 01\rATPC\rATZ\r".toByteArray(Charsets.US_ASCII))
+                out.flush()
+            }
+        } catch (_: Exception) {}
+
+        // 2. Close Bluetooth streams and socket safely
         try {
             inputStream?.close()
             outputStream?.close()
             bluetoothSocket?.close()
         } catch (_: Exception) {}
+
         inputStream = null
         outputStream = null
         bluetoothSocket = null

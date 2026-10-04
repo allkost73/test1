@@ -205,7 +205,8 @@ fun SitrakMainScreen(
                     onDiagnoseEcusRequested = { viewModel.testAndDiagnoseEcus() },
                     onToggleSimulation = { viewModel.setSimulationMode(it) },
                     onSelectProtocol = { viewModel.setProtocol(it) },
-                    onScanCanBus = { viewModel.scanAndDetectCanBus() }
+                    onScanCanBus = { viewModel.scanAndDetectCanBus() },
+                    onDisconnect = { viewModel.disconnect() }
                 )
 
                 DiagnosticTab.DTC -> DtcScreen(
@@ -462,6 +463,7 @@ fun SitrakTopBar(
                 val (statusDotColor, statusText) = when (connectionState) {
                     is ElmConnectionState.Connected -> Pair(GaugeGreen, if (connectionState.isSimulation) "Симулятор" else "ELM327")
                     is ElmConnectionState.Connecting -> Pair(SitrakOrange, "Связь...")
+                    is ElmConnectionState.Disconnecting -> Pair(SitrakOrange, "Откл...")
                     is ElmConnectionState.Error -> Pair(GaugeRed, "Ошибка")
                     is ElmConnectionState.Disconnected -> Pair(TextMuted, "Откл")
                 }

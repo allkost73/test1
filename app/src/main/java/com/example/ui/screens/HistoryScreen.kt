@@ -283,21 +283,64 @@ fun HistoryScreen(
                         }
 
                         is ElmConnectionState.Connecting -> {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        color = SitrakOrange,
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column {
+                                        Text(
+                                            text = "Установка соединения...",
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = SitrakOrange
+                                        )
+                                        Text(
+                                            text = connectionState.step,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                }
+                                Button(
+                                    onClick = onDisconnect,
+                                    colors = ButtonDefaults.buttonColors(containerColor = GaugeRed.copy(alpha = 0.8f)),
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Text("Отмена", color = Color.White, fontSize = 11.sp)
+                                }
+                            }
+                        }
+
+                        is ElmConnectionState.Disconnecting -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(20.dp),
-                                    color = SitrakOrange,
+                                    color = GaugeRed,
                                     strokeWidth = 2.dp
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column {
                                     Text(
-                                        text = "Установка соединения...",
+                                        text = "Отключение адаптера...",
                                         style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = SitrakOrange
+                                        color = TextPrimary
                                     )
                                     Text(
-                                        text = connectionState.step,
+                                        text = "Освобождение шины CAN Sitrak",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = TextSecondary
                                     )
