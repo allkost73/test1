@@ -210,6 +210,11 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
         }
     }
 
+    fun emergencyResetCanBus() {
+        val notice = elmManager.emergencyResetCanBus()
+        _statusNotice.value = notice
+    }
+
     fun dismissCalibrationDialog() {
         _calibrationDialogMessage.value = null
     }

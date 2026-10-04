@@ -206,7 +206,8 @@ fun SitrakMainScreen(
                     onToggleSimulation = { viewModel.setSimulationMode(it) },
                     onSelectProtocol = { viewModel.setProtocol(it) },
                     onScanCanBus = { viewModel.scanAndDetectCanBus() },
-                    onDisconnect = { viewModel.disconnect() }
+                    onDisconnect = { viewModel.disconnect() },
+                    onEmergencyResetCan = { viewModel.emergencyResetCanBus() }
                 )
 
                 DiagnosticTab.DTC -> DtcScreen(

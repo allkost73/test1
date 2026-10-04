@@ -488,12 +488,6 @@ class Elm327Manager(private val context: Context) {
                 logTerminal("INIT", "ELM327 сопряжен: $initZ | Сеть: $voltageResp | Протокол: $activeProto", true)
                 startPhysicalPolling()
 
-                // Diagnose ECUs asynchronously in tracked job
-                diagnoseJob?.cancel()
-                diagnoseJob = scope.launch {
-                    diagnoseAllEcus()
-                }
-
             } catch (e: CancellationException) {
                 disconnectPhysical()
             } catch (e: Exception) {
@@ -746,7 +740,7 @@ class Elm327Manager(private val context: Context) {
                         isSteeringCalibrated = isSteeringCalibrated
                     )
 
-                    delay(300) // Paced 300ms polling allows full truck CAN bandwidth for instrument cluster!
+                    delay(600) // Paced 600ms polling protects truck gateway and instrument cluster
                 } catch (e: Exception) {
                     if (e is CancellationException) break
                     delay(500)
@@ -1349,6 +1343,26 @@ class Elm327Manager(private val context: Context) {
 
     fun clearTerminalLogs() {
         _terminalLogs.value = emptyList()
+    }
+
+    fun emergencyResetCanBus(): String {
+        pollingJob?.cancel()
+        diagnoseJob?.cancel()
+        scope.launch(Dispatchers.IO) {
+            try {
+                val out = outputStream
+                if (out != null) {
+                    out.write("ATPC\rATWS\rATCSM1\rATZ\r".toByteArray(Charsets.US_ASCII))
+                    out.flush()
+                }
+            } catch (_: Exception) {}
+            delay(400)
+            if (bluetoothSocket?.isConnected == true) {
+                startPhysicalPolling()
+            }
+        }
+        logTerminal("RESET", "Экстренный сброс шины CAN (ATPC/ATWS/ATCSM1)", true)
+        return "Шина CAN сброшена (команды ATPC/ATZ). Адаптер переведен в пассивный режим."
     }
 
     fun disconnect() {

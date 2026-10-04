@@ -236,6 +236,31 @@ fun HistoryScreen(
                     Spacer(modifier = Modifier.height(12.dp))
                 }
 
+                // 24V Heavy Duty Truck Safety Card
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFF261800))
+                        .border(1.dp, SitrakOrange.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                        .padding(12.dp)
+                ) {
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = SitrakOrange, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Внимание: Бортовая сеть Sitrak 24 Вольта!", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold), color = SitrakOrange)
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "• На разъеме OBD-2 контакт 16 выдает +24V. Обычный автомобильный адаптер 12V сгорает и замыкает шину CAN (из-за чего гаснет панель приборов)!\n• Если панель приборов отключилась: извлеките адаптер и выключите зажигание Sitrak на 15 секунд.\n• Для грузовиков Sitrak используйте сканер с поддержкой 24V или переходник с понижением 24V->12V.",
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp, lineHeight = 16.sp),
+                            color = TextPrimary
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+
                 // Connection State Display
                 Box(
                     modifier = Modifier

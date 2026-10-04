@@ -96,6 +96,7 @@ fun DashboardScreen(
     onSelectProtocol: (ElmProtocol) -> Unit = {},
     onScanCanBus: () -> Unit = {},
     onDisconnect: () -> Unit = {},
+    onEmergencyResetCan: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val onlineEcuCount = ecuStates.values.count { it.status == EcuStatus.ONLINE }
@@ -653,11 +654,29 @@ fun DashboardScreen(
                                         }
                                     }
                                 }
-                                Spacer(modifier = Modifier.height(4.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = "1. Зажигание Sitrak (Кл. 15 24V) должно быть включено.\n2. Нажмите «Автоскан CAN» для перебора 250k / 500k или выберите протокол вручную:",
+                                    text = "1. Зажигание Sitrak (Кл. 15 24V) должно быть включено.\n2. Выберите безопасный протокол ISO 29/250k или нажмите «Сброс шины CAN»:",
                                     style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
                                     color = TextSecondary
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Button(
+                                    onClick = onEmergencyResetCan,
+                                    colors = ButtonDefaults.buttonColors(containerColor = GaugeRed.copy(alpha = 0.85f)),
+                                    shape = RoundedCornerShape(6.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(imageVector = Icons.Default.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Сброс шины CAN (ATPC/ATZ) — Оживить приборы", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = "• Внимание 24V: разъем OBD-2 Sitrak выдает +24V. Обычный адаптер 12V может сгореть и закоротить шину CAN!\n• Если панель погасла: извлеките адаптер из разъема и выключите зажигание на 15 секунд.",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, lineHeight = 14.sp),
+                                    color = GaugeYellow
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 // Quick Protocol Buttons (ISO 29/250k prioritized for Sitrak)

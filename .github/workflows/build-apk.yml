@@ -139,21 +139,31 @@ jobs:
       - name: Organize APK Artifacts
         run: |
           mkdir -p build-apks
-          # Find and collect all generated APKs
-          find app/build/outputs/apk -name "*.apk" -exec cp {} build-apks/ \; || true
-          
-          # Rename nicely if standard names are found
-          if [ -f "build-apks/app-debug.apk" ]; then
-            cp build-apks/app-debug.apk build-apks/SitrakS7H-debug.apk
+          # Collect generated APKs with clean naming and NO duplicates
+          if [ -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
+            cp app/build/outputs/apk/debug/app-debug.apk build-apks/SitrakS7H-debug.apk
           fi
-          if [ -f "build-apks/app-release.apk" ]; then
-            cp build-apks/app-release.apk build-apks/SitrakS7H-release.apk
-          elif [ -f "build-apks/app-release-unsigned.apk" ]; then
-            cp build-apks/app-release-unsigned.apk build-apks/SitrakS7H-release-unsigned.apk
+          if [ -f "app/build/outputs/apk/release/app-release.apk" ]; then
+            cp app/build/outputs/apk/release/app-release.apk build-apks/SitrakS7H-release.apk
+          elif [ -f "app/build/outputs/apk/release/app-release-unsigned.apk" ]; then
+            cp app/build/outputs/apk/release/app-release-unsigned.apk build-apks/SitrakS7H-release-unsigned.apk
           fi
           
-          echo "Collected APKs:"
-          ls -la build-apks/
+          # Fallback: if no files in build-apks yet, search outputs and rename without duplicating
+          if [ ! "$(ls -A build-apks 2>/dev/null)" ]; then
+            find app/build/outputs/apk -name "*.apk" -exec cp {} build-apks/ \; || true
+            if [ -f "build-apks/app-debug.apk" ]; then
+              mv build-apks/app-debug.apk build-apks/SitrakS7H-debug.apk
+            fi
+            if [ -f "build-apks/app-release.apk" ]; then
+              mv build-apks/app-release.apk build-apks/SitrakS7H-release.apk
+            elif [ -f "build-apks/app-release-unsigned.apk" ]; then
+              mv build-apks/app-release-unsigned.apk build-apks/SitrakS7H-release-unsigned.apk
+            fi
+          fi
+          
+          echo "Collected unique APKs:"
+          ls -lh build-apks/
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
