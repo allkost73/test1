@@ -367,6 +367,15 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
         _statusNotice.value = msg
     }
 
+    fun clearEbsStopFault() {
+        viewModelScope.launch {
+            _statusNotice.value = "Сброс диагностического режима и ошибок блока WABCO EBS..."
+            val result = elmManager.clearEbsStopFault()
+            _statusNotice.value = result
+            _calibrationDialogMessage.value = result
+        }
+    }
+
     fun setSimulatedSteeringAngle(angleDeg: Float) {
         elmManager.setSimulatedSteeringAngle(angleDeg)
     }

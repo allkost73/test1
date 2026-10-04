@@ -251,7 +251,8 @@ fun SitrakMainScreen(
                     onCalibrateSteeringZero = { viewModel.calibrateSteeringZero() },
                     onResetSteeringCalibration = { viewModel.resetSteeringCalibration() },
                     onAdjustSteeringOffset = { viewModel.adjustSteeringOffset(it) },
-                    onSimulateSteeringAngle = { viewModel.setSimulatedSteeringAngle(it) }
+                    onSimulateSteeringAngle = { viewModel.setSimulatedSteeringAngle(it) },
+                    onClearEbsStopFault = { viewModel.clearEbsStopFault() }
                 )
 
                 DiagnosticTab.TERMINAL -> TerminalScreen(

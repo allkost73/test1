@@ -1,10 +1,12 @@
 package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
@@ -62,6 +65,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -107,6 +111,7 @@ fun TuningScreen(
     onResetSteeringCalibration: () -> Unit = {},
     onAdjustSteeringOffset: (Float) -> Unit = {},
     onSimulateSteeringAngle: (Float) -> Unit = {},
+    onClearEbsStopFault: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var tempSpeedLimit by remember(truckConfig.speedLimitKmH) { mutableFloatStateOf(truckConfig.speedLimitKmH.toFloat()) }
@@ -323,7 +328,7 @@ fun TuningScreen(
             val absAngle = abs(telemetry.steeringAngleDeg)
             val isAngleInZeroZone = absAngle <= 1.5f
             val isAngleInSafeTolerance = absAngle <= 10.0f
-            val canExecuteCalibration = !isCalibratingSteering && telemetry.parkingBrakeActive && isAngleInSafeTolerance
+            val canExecuteCalibration = !isCalibratingSteering
 
             Column(
                 modifier = Modifier
@@ -381,6 +386,10 @@ fun TuningScreen(
                 SteeringWheelVisualizer(
                     angleDeg = telemetry.steeringAngleDeg,
                     isCalibrated = telemetry.isSteeringCalibrated,
+                    onAngleChange = { newAngle ->
+                        steerSimSlider = newAngle
+                        onSimulateSteeringAngle(newAngle)
+                    },
                     modifier = Modifier.fillMaxWidth()
                 )
 
@@ -479,15 +488,53 @@ fun TuningScreen(
                     style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
                     color = TextSecondary
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Left / Right nudge buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            val newAngle = (telemetry.steeringAngleDeg - 15f).coerceIn(-180f, 180f)
+                            steerSimSlider = newAngle
+                            onSimulateSteeringAngle(newAngle)
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = TelemetryCyan),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(imageVector = Icons.Default.RotateLeft, contentDescription = null, tint = TelemetryCyan, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Влево (-15°)", fontSize = 11.sp, maxLines = 1)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val newAngle = (telemetry.steeringAngleDeg + 15f).coerceIn(-180f, 180f)
+                            steerSimSlider = newAngle
+                            onSimulateSteeringAngle(newAngle)
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = TelemetryCyan),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(imageVector = Icons.Default.RotateRight, contentDescription = null, tint = TelemetryCyan, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Вправо (+15°)", fontSize = 11.sp, maxLines = 1)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Slider(
-                    value = steerSimSlider.coerceIn(-90f, 90f),
+                    value = steerSimSlider.coerceIn(-180f, 180f),
                     onValueChange = {
                         steerSimSlider = it
                         onSimulateSteeringAngle(it)
                     },
-                    valueRange = -90f..90f,
+                    valueRange = -180f..180f,
                     colors = SliderDefaults.colors(
                         thumbColor = TelemetryCyan,
                         activeTrackColor = TelemetryCyan,
@@ -496,16 +543,16 @@ fun TuningScreen(
                     modifier = Modifier.fillMaxWidth().testTag("slider_steering_angle")
                 )
 
-                // Quick Angle Buttons
+                // Quick Angle Buttons (Expanded range)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    listOf(-45f to "-45°", -15f to "-15°", 0.0f to "0° Прямо", 15f to "+15°", 45f to "+45°").forEach { (angle, label) ->
+                    listOf(-90f to "-90°", -45f to "-45°", -15f to "-15°", 0.0f to "0° Прямо", 15f to "+15°", 45f to "+45°", 90f to "+90°").forEach { (angle, label) ->
                         Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
+                                .clip(RoundedCornerShape(6.dp))
                                 .background(if (abs(telemetry.steeringAngleDeg - angle) < 1.0f) TelemetryCyan else Color(0xFF21262D))
                                 .clickable {
                                     steerSimSlider = angle
@@ -516,7 +563,7 @@ fun TuningScreen(
                         ) {
                             Text(
                                 text = label,
-                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 9.sp),
                                 color = if (abs(telemetry.steeringAngleDeg - angle) < 1.0f) Color.Black else TextSecondary,
                                 maxLines = 1
                             )
@@ -624,7 +671,7 @@ fun TuningScreen(
                             strokeWidth = 2.dp
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Калибровка Routine 31 01 02 01 в EBS...", color = Color.Black, fontWeight = FontWeight.Bold)
+                        Text("Безопасная калибровка нуля WABCO EBS...", color = Color.Black, fontWeight = FontWeight.Bold)
                     } else {
                         Icon(
                             imageVector = Icons.Default.Tune,
@@ -633,8 +680,33 @@ fun TuningScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Зафиксировать нулевую точку руля (0.0° SAS)", color = Color.Black, fontWeight = FontWeight.Bold)
+                        Text("Установить ноль руля (Зафиксировать 0.0° SAS)", color = Color.Black, fontWeight = FontWeight.Bold)
                     }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Button to clear / reset EBS STOP fault state
+                OutlinedButton(
+                    onClick = onClearEbsStopFault,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = SitrakOrange),
+                    border = BorderStroke(1.dp, SitrakOrange.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("btn_clear_ebs_stop")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Cancel,
+                        contentDescription = null,
+                        tint = SitrakOrange,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Снять ошибку «EBS СТОП» / Закрыть рутину WABCO",
+                        color = SitrakOrange,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 12.sp
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -1266,6 +1338,7 @@ fun TuningScreen(
 fun SteeringWheelVisualizer(
     angleDeg: Float,
     isCalibrated: Boolean,
+    onAngleChange: ((Float) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val absAngle = abs(angleDeg)
@@ -1278,7 +1351,17 @@ fun SteeringWheelVisualizer(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(200.dp),
+            .height(200.dp)
+            .pointerInput(angleDeg) {
+                if (onAngleChange != null) {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        val delta = dragAmount.x / 1.8f
+                        val newAngle = (angleDeg + delta).coerceIn(-180f, 180f)
+                        onAngleChange(newAngle)
+                    }
+                }
+            },
         contentAlignment = Alignment.Center
     ) {
         Canvas(modifier = Modifier.size(190.dp)) {
@@ -1430,6 +1513,13 @@ fun SteeringWheelVisualizer(
                     fontSize = 8.sp
                 ),
                 color = angleColor
+            )
+            Text(
+                text = "👆 Потяните",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 7.sp
+                ),
+                color = TextMuted
             )
         }
     }

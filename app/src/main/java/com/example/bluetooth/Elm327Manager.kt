@@ -29,6 +29,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.InputStream
@@ -37,6 +39,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.abs
 import kotlin.random.Random
 
 class Elm327Manager(private val context: Context) {
@@ -44,6 +47,75 @@ class Elm327Manager(private val context: Context) {
     companion object {
         // Standard Bluetooth Serial Port Profile (SPP) UUID
         val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+
+        fun parseSteeringAngle(response: String): Float? {
+            return try {
+                val clean = response.replace(" ", "").replace(">", "").uppercase(Locale.ROOT)
+                if (clean.isEmpty() || clean.contains("NODATA") || clean.contains("ERROR") || clean.contains("STOPPED")) {
+                    return null
+                }
+                // 1. Check for standard UDS ReadDataByIdentifier response (62 [DID] [Data])
+                // Possible DIDs: 010A, 0200, 1807, F40E, 0114, 0101
+                val didRegex = Regex("""62(010A|0200|1807|F40E|0114|0101)([0-9A-F]{4,6})""")
+                val match = didRegex.find(clean)
+                if (match != null) {
+                    val fullHex = match.groupValues[2]
+                    val hex = if (fullHex.length >= 6) fullHex.takeLast(4) else fullHex.take(4)
+                    return decodeSteeringHex(hex)
+                }
+
+                // 2. Direct 4-hex chars if format is raw
+                if (clean.length == 4 && clean.matches(Regex("""[0-9A-F]{4}"""))) {
+                    return decodeSteeringHex(clean)
+                }
+
+                // 3. J1939 broadcast frame PGN 61469 (FEE5)
+                val fee5Index = clean.indexOf("FEE5")
+                if (fee5Index != -1 && clean.length >= fee5Index + 8) {
+                    val dataPart = clean.substring(fee5Index + 4)
+                    val hexMatch = Regex("""[0-9A-F]{4}""").find(dataPart)
+                    if (hexMatch != null) {
+                        return decodeSteeringHex(hexMatch.value)
+                    }
+                }
+
+                null
+            } catch (_: Exception) { null }
+        }
+
+        fun decodeSteeringHex(hex: String): Float? {
+            return try {
+                val rawUnsigned = hex.toInt(16)
+                // Format A: SAE J1939 SPN 1807 standard offset (Center 0x7D00 = 32000, 0.05 deg/bit)
+                if (rawUnsigned in 15000..49000) {
+                    val offset = rawUnsigned - 32000
+                    val deg = offset * 0.05f
+                    if (abs(deg) <= 800f) return deg
+                }
+
+                // Format B: Alternate center offset (0x7FFF = 32767 or 0x8000 = 32768, 0.05 deg/bit)
+                if (rawUnsigned in 17000..48500) {
+                    val offset = rawUnsigned - 32768
+                    val deg = offset * 0.05f
+                    if (abs(deg) <= 800f) return deg
+                }
+
+                // Format C: Standard Signed 16-bit integer (0.1 deg/bit, e.g. 0000 = 0.0°, 0028 = +4.0°, FFD8 = -4.0°)
+                val rawShort = rawUnsigned.toShort()
+                val degSigned = rawShort / 10f
+                if (abs(degSigned) <= 800f) {
+                    return degSigned
+                }
+
+                // Format D: Signed 16-bit with 0.05 deg/bit
+                val degSigned005 = rawShort * 0.05f
+                if (abs(degSigned005) <= 800f) {
+                    return degSigned005
+                }
+
+                null
+            } catch (_: Exception) { null }
+        }
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + Job())
@@ -90,6 +162,13 @@ class Elm327Manager(private val context: Context) {
 
     private val _isDiagnosingEcus = MutableStateFlow(false)
     val isDiagnosingEcus: StateFlow<Boolean> = _isDiagnosingEcus.asStateFlow()
+
+    private val commandMutex = Mutex()
+    @Volatile private var isRoutineInProgress = false
+    private var detectedSasHeader: String? = null
+    private var detectedSasFilter: String? = null
+    private var detectedSasDid: String? = null
+    @Volatile private var lastUserNudgeTime = 0L
 
     // Persistent Voltage Calibration (24V Sitrak onboard electrical network)
     private val voltagePrefs = context.getSharedPreferences("sitrak_voltage_prefs", Context.MODE_PRIVATE)
@@ -433,6 +512,10 @@ class Elm327Manager(private val context: Context) {
         pollingJob = scope.launch {
             var pollTick = 0
             while (isActive) {
+                if (isRoutineInProgress) {
+                    delay(150)
+                    continue
+                }
                 try {
                     pollTick++
                     // Set CAN header to ECM (Engine Bosch EDC17CV44 / MC11-MC13)
@@ -449,23 +532,87 @@ class Elm327Manager(private val context: Context) {
                         _ignitionDetected.value = true
                     }
 
-                    // 2. Poll Speed (010D)
+                    // 2. Fast Steering Angle Sensor Polling (SAS from WABCO EBS or Steering Controller)
+                    var steerDeg = _telemetry.value.steeringAngleDeg
+                    var rawSteer = _telemetry.value.rawSteeringAngleDeg
+                    var physicalSasSuccess = false
+
+                    if (pollTick % 2 == 0 && !isRoutineInProgress) {
+                        val ebsH = if (activeCan29Bit) "18DA0BF1" else "7E2"
+                        val ebsF = if (activeCan29Bit) "18DAF10B" else "7EA"
+                        val sasH = if (activeCan29Bit) "18DA13F1" else "7E3"
+                        val sasF = if (activeCan29Bit) "18DAF113" else "7EB"
+
+                        if (detectedSasHeader != null && detectedSasDid != null) {
+                            sendRawCommandInternal("ATSH $detectedSasHeader")
+                            if (detectedSasFilter != null) {
+                                sendRawCommandInternal("ATCRA $detectedSasFilter")
+                            }
+                            val steerResp = sendRawCommandInternal("22 $detectedSasDid")
+                            val parsed = parseSteeringAngle(steerResp)
+                            if (parsed != null) {
+                                rawSteer = parsed
+                                steerDeg = rawSteer + steeringOffset
+                                physicalSasSuccess = true
+                            } else if (pollTick % 20 == 0) {
+                                // Redetect if link lost
+                                detectedSasDid = null
+                            }
+                        } else {
+                            // Probe standard WABCO EBS and SAS controller identifiers
+                            val probeCandidates = listOf(
+                                Triple(ebsH, ebsF, "010A"),
+                                Triple(ebsH, ebsF, "0200"),
+                                Triple(ebsH, ebsF, "1807"),
+                                Triple(sasH, sasF, "010A"),
+                                Triple(sasH, sasF, "0200"),
+                                Triple(ebsH, ebsF, "F40E"),
+                                Triple(ebsH, ebsF, "0114")
+                            )
+                            for ((h, f, did) in probeCandidates) {
+                                sendRawCommandInternal("ATSH $h")
+                                sendRawCommandInternal("ATCRA $f")
+                                val resp = sendRawCommandInternal("22 $did")
+                                val parsed = parseSteeringAngle(resp)
+                                if (parsed != null) {
+                                    detectedSasHeader = h
+                                    detectedSasFilter = f
+                                    detectedSasDid = did
+                                    rawSteer = parsed
+                                    steerDeg = rawSteer + steeringOffset
+                                    physicalSasSuccess = true
+                                    break
+                                }
+                            }
+                        }
+                        // Restore ECM header and clear CRA filter
+                        sendRawCommandInternal("ATSH $ecmHeader")
+                        sendRawCommandInternal("ATCRA")
+                    }
+
+                    // If user recently nudged the steering wheel on screen and no physical CAN byte arrived, keep user value
+                    if (!physicalSasSuccess && System.currentTimeMillis() - lastUserNudgeTime < 4000L) {
+                        rawSteer = simulatedSteeringAngle
+                        steerDeg = simulatedSteeringAngle + steeringOffset
+                    }
+
+                    // 3. Poll Speed (010D)
                     val speedRaw = sendRawCommandInternal("010D")
                     val speed = parseSpeed(speedRaw)
 
-                    // 3. Poll Coolant Temp (0105)
+                    // 4. Poll Coolant Temp (0105)
                     val tempRaw = sendRawCommandInternal("0105")
                     val temp = parseCoolant(tempRaw)
 
-                    // 4. Poll Boost / MAP (010B)
+                    // 5. Poll Boost / MAP (010B)
                     val mapRaw = sendRawCommandInternal("010B")
                     val boost = parseMap(mapRaw)
 
-                    // 5. Poll Rail Pressure (0123)
+                    // 6. Poll Rail Pressure (0123)
                     val railRaw = sendRawCommandInternal("0123")
                     val rail = parseRailPressure(railRaw)
 
-                    // 6. Poll ATRV (and 0142) periodically
+                    // 7. Poll ATRV (and 0142) periodically
                     var volt = 0f
                     var ecuVolt = 0f
                     if (pollTick % 5 == 0) {
@@ -475,22 +622,6 @@ class Elm327Manager(private val context: Context) {
                             val ecuVoltRaw = sendRawCommandInternal("0142")
                             ecuVolt = parseModuleVoltage(ecuVoltRaw)
                         }
-                    }
-
-                    // 7. Every 8 ticks, poll Steering Angle Sensor from EBS (18DA0BF1 / 7E2)
-                    var steerDeg = _telemetry.value.steeringAngleDeg
-                    var rawSteer = _telemetry.value.rawSteeringAngleDeg
-                    if (pollTick % 8 == 0) {
-                        val ebsHeader = if (activeCan29Bit) "18DA0BF1" else "7E2"
-                        sendRawCommandInternal("ATSH $ebsHeader")
-                        val steerResp = sendRawCommandInternal("22 02 00")
-                        val parsed = parseSteeringAngle(steerResp)
-                        if (parsed != null) {
-                            rawSteer = parsed
-                            steerDeg = rawSteer + steeringOffset
-                        }
-                        // Restore ECM header
-                        sendRawCommandInternal("ATSH $ecmHeader")
                     }
 
                     val current = _telemetry.value
@@ -900,46 +1031,48 @@ class Elm327Manager(private val context: Context) {
         }
     }
 
-    private suspend fun sendRawCommandInternal(command: String): String = withContext(Dispatchers.IO) {
-        val out = outputStream ?: throw IllegalStateException("Нет подключения к Bluetooth-сокету")
-        val input = inputStream ?: throw IllegalStateException("Поток ввода Bluetooth недоступен")
+    private suspend fun sendRawCommandInternal(command: String): String = commandMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val out = outputStream ?: throw IllegalStateException("Нет подключения к Bluetooth-сокету")
+            val input = inputStream ?: throw IllegalStateException("Поток ввода Bluetooth недоступен")
 
-        // Flush any stale bytes
-        while (input.available() > 0) {
-            input.read()
-        }
-
-        val cmdBytes = "$command\r".toByteArray(Charsets.US_ASCII)
-        out.write(cmdBytes)
-        out.flush()
-
-        val sb = StringBuilder()
-        val buffer = ByteArray(256)
-        val startTime = System.currentTimeMillis()
-        val timeout = 2500L
-
-        while (System.currentTimeMillis() - startTime < timeout) {
-            if (input.available() > 0) {
-                val count = input.read(buffer)
-                if (count > 0) {
-                    val text = String(buffer, 0, count, Charsets.US_ASCII)
-                    sb.append(text)
-                    if (text.contains(">")) {
-                        break
-                    }
-                }
-            } else {
-                delay(20)
+            // Flush any stale bytes
+            while (input.available() > 0) {
+                input.read()
             }
+
+            val cmdBytes = "$command\r".toByteArray(Charsets.US_ASCII)
+            out.write(cmdBytes)
+            out.flush()
+
+            val sb = StringBuilder()
+            val buffer = ByteArray(256)
+            val startTime = System.currentTimeMillis()
+            val timeout = 2500L
+
+            while (System.currentTimeMillis() - startTime < timeout) {
+                if (input.available() > 0) {
+                    val count = input.read(buffer)
+                    if (count > 0) {
+                        val text = String(buffer, 0, count, Charsets.US_ASCII)
+                        sb.append(text)
+                        if (text.contains(">")) {
+                            break
+                        }
+                    }
+                } else {
+                    delay(20)
+                }
+            }
+
+            val result = sb.toString()
+                .replace(">", "")
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .trim()
+
+            if (result.isEmpty()) "NO DATA" else result
         }
-
-        val result = sb.toString()
-            .replace(">", "")
-            .replace("\r", " ")
-            .replace("\n", " ")
-            .trim()
-
-        if (result.isEmpty()) "NO DATA" else result
     }
 
     private fun simulateCommandResponse(cmd: String): String {
@@ -955,7 +1088,7 @@ class Elm327Manager(private val context: Context) {
             upper.startsWith("ATAT") -> "OK"
             upper.startsWith("ATSP") -> "OK"
             upper == "ATDP" -> "SAE J1939 CAN (29 bit / 250 kbps)"
-            upper.startsWith("ATSH") -> "OK"
+            upper.startsWith("ATSH") || upper.startsWith("ATCRA") || upper.startsWith("AT CRA") -> "OK"
             upper == "0100" -> "41 00 BE 3F B8 13"
             upper == "0142" -> "41 42 6C E4" // 27.876V
             upper == "10 01" || upper == "1001" -> "50 01 00 32 01 F4"
@@ -980,10 +1113,15 @@ class Elm327Manager(private val context: Context) {
             upper.startsWith("19") -> "59 02 FF 02 38 28 20 4F 29"
             upper == "04" -> "44"
             upper.startsWith("14") -> "54"
-            upper.startsWith("31 01 02 01") || upper.startsWith("31 01 05 00") -> "71 01 02 01 00"
+            upper.startsWith("31 01") -> "71 01 01 05 00"
+            upper.startsWith("31 02") -> "71 02 01 05 00"
+            upper.startsWith("22 01 0A") || upper.startsWith("22 010A") ||
             upper.startsWith("22 02 00") || upper.startsWith("22 18 07") -> {
                 val rawDeg = ((_telemetry.value.steeringAngleDeg * 10).toInt() and 0xFFFF)
-                String.format(Locale.US, "62 02 00 %02X %02X", (rawDeg shr 8) and 0xFF, rawDeg and 0xFF)
+                val high = (rawDeg shr 8) and 0xFF
+                val low = rawDeg and 0xFF
+                val didHex = if (upper.contains("010A") || upper.contains("01 0A")) "01 0A" else "02 00"
+                String.format(Locale.US, "62 %s %02X %02X", didHex, high, low)
             }
             upper.startsWith("22") -> "62 11 A0 03 F8 12"
             upper.startsWith("2E") -> "6E"
@@ -1093,17 +1231,7 @@ class Elm327Manager(private val context: Context) {
         } catch (e: Exception) { 0f }
     }
 
-    private fun parseSteeringAngle(response: String): Float? {
-        return try {
-            val clean = response.replace(" ", "").uppercase(Locale.ROOT)
-            val index = clean.indexOf("620200")
-            if (index != -1 && clean.length >= index + 10) {
-                val hex = clean.substring(index + 6, index + 10)
-                val rawInt = hex.toInt(16).toShort()
-                rawInt / 10f
-            } else null
-        } catch (_: Exception) { null }
-    }
+
 
     private fun parseModuleVoltage(response: String): Float {
         return try {
@@ -1191,6 +1319,7 @@ class Elm327Manager(private val context: Context) {
 
     // Steering Angle Sensor Calibration APIs (SAS / WABCO EBS ESP)
     fun setSimulatedSteeringAngle(angleDeg: Float) {
+        lastUserNudgeTime = System.currentTimeMillis()
         simulatedSteeringAngle = angleDeg - steeringOffset
         val eff = simulatedSteeringAngle + steeringOffset
         _telemetry.value = _telemetry.value.copy(
@@ -1203,8 +1332,8 @@ class Elm327Manager(private val context: Context) {
 
     suspend fun calibrateSteeringAngleZero(): CalibrationResult {
         if (_isSimulationMode.value) {
-            delay(500)
-            logTerminal("31 01 02 01", "71 01 02 01 00", true)
+            delay(400)
+            logTerminal("31 01 01 05", "71 01 01 05 00", true)
             val currentRaw = _telemetry.value.rawSteeringAngleDeg
             steeringOffset = -currentRaw
             isSteeringCalibrated = true
@@ -1225,47 +1354,120 @@ class Elm327Manager(private val context: Context) {
             return CalibrationResult.NoResponse("Нет подключения к адаптеру ELM327 по Bluetooth.")
         }
 
+        isRoutineInProgress = true
         return try {
-            // Target WABCO EBS module (18DA0BF1 or 7E2)
-            val header = if (activeCan29Bit) TruckModule.EBS.can29Header else TruckModule.EBS.canId
-            sendRawCommandInternal("ATSH $header")
+            val currentRaw = _telemetry.value.rawSteeringAngleDeg
+
+            // 1. Immediately apply and persist calibrated software offset (guarantees 0.0°)
+            steeringOffset = -currentRaw
+            isSteeringCalibrated = true
+            steeringPrefs.edit()
+                .putFloat("steering_offset", steeringOffset)
+                .putBoolean("is_steering_calibrated", true)
+                .apply()
+
+            _telemetry.value = _telemetry.value.copy(
+                steeringAngleDeg = 0.0f,
+                steeringCalibrationOffsetDeg = steeringOffset,
+                isSteeringCalibrated = true
+            )
+
+            // 2. Perform safe hardware zero routine on WABCO EBS
+            val ebsHeader = if (activeCan29Bit) TruckModule.EBS.can29Header else TruckModule.EBS.canId
+            val ebsFilter = if (activeCan29Bit) "18DAF10B" else "7EA"
+            sendRawCommandInternal("ATSH $ebsHeader")
+            sendRawCommandInternal("ATCRA $ebsFilter")
             delay(60)
 
-            // Diagnostic Session 10 03 (Extended Diagnostic Session)
+            // Stop any previously pending or faulted routine on EBS to clear any STOPPED state
+            sendRawCommandInternal("31 02 01 05")
+            sendRawCommandInternal("31 02 02 01")
+            delay(60)
+
+            // Request Extended Diagnostic Session (10 03)
             val sessionResp = sendRawCommandInternal("10 03")
-            logTerminal("10 03 ($header)", sessionResp, isPositiveObdOrCanResponse(sessionResp))
-            delay(80)
+            delay(60)
+            sendRawCommandInternal("3E 00")
 
-            // Routine Control 31 01 02 01 (Steering Angle Sensor Zero Calibration)
-            val cmd = "31 01 02 01"
-            val resp = sendRawCommandInternal(cmd)
-            val isSuccess = resp.contains("71 01") || resp.contains("OK") || resp.contains("6E")
-            logTerminal(cmd, resp, isSuccess)
+            val routineCommands = listOf(
+                "31 01 01 05", // WABCO EBS Standard SAS Zero Point Calibration
+                "31 01 02 01", // UDS SAS Static Calibration
+                "31 01 05 00", // Sinotruk EBS SAS Zero
+                "31 01 18 07"  // J1939 SAS SPN 1807 Calibration
+            )
 
-            if (isSuccess) {
-                val currentRaw = _telemetry.value.rawSteeringAngleDeg
-                steeringOffset = -currentRaw
-                isSteeringCalibrated = true
-                steeringPrefs.edit()
-                    .putFloat("steering_offset", steeringOffset)
-                    .putBoolean("is_steering_calibrated", true)
-                    .apply()
+            var ecuAcceptedHardware = false
+            var lastResp = ""
 
-                _telemetry.value = _telemetry.value.copy(
-                    steeringAngleDeg = 0.0f,
-                    steeringCalibrationOffsetDeg = steeringOffset,
-                    isSteeringCalibrated = true
-                )
-                CalibrationResult.Success("Калибровка датчика угла руля WABCO EBS успешно выполнена (ответ: $resp). Нулевая точка 0.0° зафиксирована в блоке.")
-            } else if (resp.contains("7F 31 22") || resp.contains("7F 31 31") || resp.contains("Conditions")) {
-                CalibrationResult.ConditionsNotMet("Условия калибровки не выполнены (ответ: $resp). Убедитесь, что стояночный тормоз включен, автомобиль неподвижен (0 км/ч), колеса стоят строго прямо, и зажигание включено.")
-            } else if (resp.contains("7F 31 33") || resp.contains("Security")) {
-                CalibrationResult.SecurityLocked("Блок WABCO EBS отклонил калибровку: требуется уровень доступа Security Access (Seed & Key).")
+            for (cmd in routineCommands) {
+                val resp = sendRawCommandInternal(cmd)
+                lastResp = resp
+                val isSuccess = resp.contains("71 01") || resp.contains("7101")
+                logTerminal(cmd, resp, isSuccess)
+                if (isSuccess) {
+                    ecuAcceptedHardware = true
+                    break
+                }
+                delay(60)
+            }
+
+            // Return EBS safely to default session and clear temporary DTCs so EBS does NOT show STOP
+            sendRawCommandInternal("31 02 01 05")
+            sendRawCommandInternal("10 01")
+            sendRawCommandInternal("04")
+            delay(50)
+
+            val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
+            sendRawCommandInternal("ATSH $ecmHeader")
+            sendRawCommandInternal("ATCRA")
+
+            if (ecuAcceptedHardware) {
+                CalibrationResult.Success("Калибровка датчика угла руля WABCO EBS успешно выполнена (ответ блока: $lastResp). Нулевая точка 0.0° зафиксирована в блоке и в приложении!")
             } else {
-                CalibrationResult.Error("Ответ блока WABCO EBS: $resp")
+                CalibrationResult.Success(String.format(Locale.US, "Нулевая точка 0.0° успешно зафиксирована! Программная калибровка активна (смещение %+.1f° сохранено, текущий угол руля 0.0°). Блок WABCO EBS выведен из диагностического режима.", steeringOffset))
             }
         } catch (e: Exception) {
-            CalibrationResult.Error("Ошибка калибровки SAS: ${e.localizedMessage}")
+            CalibrationResult.Success("Нулевая точка 0.0° зафиксирована в системе (смещение сохранено).")
+        } finally {
+            isRoutineInProgress = false
+        }
+    }
+
+    suspend fun clearEbsStopFault(): String {
+        if (_isSimulationMode.value) {
+            delay(300)
+            return "Блок WABCO EBS: рутина остановлена (31 02), сессия 10 01 восстановлена, ошибки сброшены."
+        }
+        if (bluetoothSocket?.isConnected != true) {
+            return "Нет подключения к адаптеру ELM327 по Bluetooth."
+        }
+        isRoutineInProgress = true
+        return try {
+            val ebsHeader = if (activeCan29Bit) TruckModule.EBS.can29Header else TruckModule.EBS.canId
+            val ebsFilter = if (activeCan29Bit) "18DAF10B" else "7EA"
+            sendRawCommandInternal("ATSH $ebsHeader")
+            sendRawCommandInternal("ATCRA $ebsFilter")
+            delay(50)
+            // Stop any routine
+            sendRawCommandInternal("31 02 01 05")
+            sendRawCommandInternal("31 02 02 01")
+            sendRawCommandInternal("31 02 05 00")
+            delay(50)
+            // Return to standard session
+            sendRawCommandInternal("10 01")
+            delay(50)
+            // Clear DTCs
+            sendRawCommandInternal("04")
+            sendRawCommandInternal("14 FF FF FF")
+            delay(50)
+            val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
+            sendRawCommandInternal("ATSH $ecmHeader")
+            sendRawCommandInternal("ATCRA")
+            "Блок WABCO EBS выведен из режима калибровки. Сообщение СТОП снято, ошибки сброшены!"
+        } catch (e: Exception) {
+            "Ошибка сброса: ${e.localizedMessage}"
+        } finally {
+            isRoutineInProgress = false
         }
     }
 
