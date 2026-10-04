@@ -151,8 +151,32 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     }
 
     fun setProtocol(protocol: ElmProtocol) {
-        elmManager.setProtocol(protocol)
-        _statusNotice.value = "Выбран протокол: ${protocol.displayName}"
+        viewModelScope.launch {
+            _statusNotice.value = "Переключение шины CAN на ${protocol.displayName}..."
+            elmManager.applyProtocol(protocol)
+            val results = elmManager.diagnoseAllEcus()
+            val onlineCount = results.values.count { it.status == EcuStatus.ONLINE }
+            _statusNotice.value = if (onlineCount > 0) {
+                "Связь установлена (${protocol.displayName})! В сети $onlineCount блоков."
+            } else {
+                "Протокол ${protocol.displayName} активирован. Блоки пока не ответили."
+            }
+        }
+    }
+
+    fun scanAndDetectCanBus() {
+        viewModelScope.launch {
+            _statusNotice.value = "Глубокое сканирование шины CAN Sitrak (перебор 250k / 500k)..."
+            val proto = elmManager.scanAndDetectCanBus()
+            _statusNotice.value = "Шина CAN определена: $proto. Запуск опроса блоков..."
+            val results = elmManager.diagnoseAllEcus()
+            val onlineCount = results.values.count { it.status == EcuStatus.ONLINE }
+            _statusNotice.value = if (onlineCount > 0) {
+                "Связь установлена ($proto)! Блоки в сети: $onlineCount из ${results.size}"
+            } else {
+                "Блоки не ответили на $proto. Проверьте зажигание (Кл. 15 24V) и контакты разъема."
+            }
+        }
     }
 
     fun connectDevice(device: BluetoothDeviceInfo) {

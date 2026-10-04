@@ -94,6 +94,7 @@ fun DashboardScreen(
     onDiagnoseEcusRequested: () -> Unit = {},
     onToggleSimulation: (Boolean) -> Unit = {},
     onSelectProtocol: (ElmProtocol) -> Unit = {},
+    onScanCanBus: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val onlineEcuCount = ecuStates.values.count { it.status == EcuStatus.ONLINE }
@@ -565,7 +566,10 @@ fun DashboardScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
                                         Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = GaugeYellow, modifier = Modifier.size(16.dp))
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
@@ -574,20 +578,32 @@ fun DashboardScreen(
                                             color = TextPrimary
                                         )
                                     }
-                                    Button(
-                                        onClick = onDiagnoseEcusRequested,
-                                        colors = ButtonDefaults.buttonColors(containerColor = SitrakOrange),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        shape = RoundedCornerShape(6.dp)
-                                    ) {
-                                        Icon(imageVector = Icons.Default.Refresh, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Опросить", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Button(
+                                            onClick = onScanCanBus,
+                                            colors = ButtonDefaults.buttonColors(containerColor = TelemetryCyan),
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Icon(imageVector = Icons.Default.Tune, contentDescription = null, tint = Color.Black, modifier = Modifier.size(13.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Автоскан CAN", color = Color.Black, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                        Button(
+                                            onClick = onDiagnoseEcusRequested,
+                                            colors = ButtonDefaults.buttonColors(containerColor = SitrakOrange),
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Icon(imageVector = Icons.Default.Refresh, contentDescription = null, tint = Color.Black, modifier = Modifier.size(13.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Опросить", color = Color.Black, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        }
                                     }
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "1. Включите зажигание Sitrak (Кл. 15 24V).\n2. Убедитесь в надежном контакте разъема OBD-2.\n3. Переключите рабочий протокол CAN шины:",
+                                    text = "1. Зажигание Sitrak (Кл. 15 24V) должно быть включено.\n2. Нажмите «Автоскан CAN» для перебора 250k / 500k или выберите протокол вручную:",
                                     style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
                                     color = TextSecondary
                                 )
@@ -604,15 +620,18 @@ fun DashboardScreen(
                                         ElmProtocol.AUTO to "АВТО",
                                         ElmProtocol.J1939_250K to "J1939 250k"
                                     ).forEach { (proto, label) ->
+                                        val isCurrent = detectedCanBus?.contains(label.take(6)) == true || (proto == ElmProtocol.AUTO && detectedCanBus == null)
+                                        val btnBg = if (isCurrent) SitrakOrange else Color(0xFF21262D)
+                                        val btnTextColor = if (isCurrent) Color.Black else SitrakOrange
+
                                         Box(
                                             modifier = Modifier
                                                 .weight(1f)
                                                 .clip(RoundedCornerShape(6.dp))
-                                                .background(Color(0xFF21262D))
-                                                .border(1.dp, SitrakOrange.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                                                .background(btnBg)
+                                                .border(1.dp, SitrakOrange.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
                                                 .clickable {
                                                     onSelectProtocol(proto)
-                                                    onDiagnoseEcusRequested()
                                                 }
                                                 .padding(vertical = 6.dp),
                                             contentAlignment = Alignment.Center
@@ -620,7 +639,7 @@ fun DashboardScreen(
                                             Text(
                                                 text = label,
                                                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
-                                                color = SitrakOrange,
+                                                color = btnTextColor,
                                                 maxLines = 1
                                             )
                                         }

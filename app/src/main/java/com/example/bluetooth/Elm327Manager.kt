@@ -246,6 +246,47 @@ class Elm327Manager(private val context: Context) {
 
     fun setProtocol(protocol: ElmProtocol) {
         _selectedProtocol.value = protocol
+        if (bluetoothSocket?.isConnected == true) {
+            scope.launch {
+                applyProtocol(protocol)
+            }
+        }
+    }
+
+    suspend fun applyProtocol(protocol: ElmProtocol): String {
+        _selectedProtocol.value = protocol
+        if (_isSimulationMode.value || bluetoothSocket?.isConnected != true) {
+            _detectedCanBus.value = protocol.displayName
+            val currentConn = _connectionState.value
+            if (currentConn is ElmConnectionState.Connected) {
+                _connectionState.value = currentConn.copy(protocol = protocol.displayName)
+            }
+            return protocol.displayName
+        }
+
+        return try {
+            sendRawCommandInternal("ATPC") // Close protocol and clear CAN errors
+            if (protocol != ElmProtocol.AUTO) {
+                sendRawCommandInternal(protocol.atCommand)
+            } else {
+                sendRawCommandInternal("ATSP0")
+            }
+            activeCan29Bit = protocol.code.contains("29") || protocol.code.contains("J1939") || protocol == ElmProtocol.AUTO
+            val bcast = if (activeCan29Bit) "18DB33F1" else "7DF"
+            sendRawCommandInternal("ATSH $bcast")
+            sendRawCommandInternal("ATCRA") // Open receive filter
+            sendRawCommandInternal("ATST64")
+            _detectedCanBus.value = protocol.displayName
+            val currentConn = _connectionState.value
+            if (currentConn is ElmConnectionState.Connected) {
+                _connectionState.value = currentConn.copy(protocol = protocol.displayName)
+            }
+            logTerminal("PROTO", "Активирован протокол шины: ${protocol.displayName} (${protocol.atCommand})", true)
+            protocol.displayName
+        } catch (e: Exception) {
+            logTerminal("PROTO", "Ошибка переключения протокола: ${e.message}", false)
+            protocol.displayName
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -762,77 +803,164 @@ class Elm327Manager(private val context: Context) {
     suspend fun autoDetectSitrakCanProtocol(): String {
         val userProto = _selectedProtocol.value
         if (userProto != ElmProtocol.AUTO) {
-            sendRawCommandInternal(userProto.atCommand)
-            activeCan29Bit = userProto.code.contains("29") || userProto.code.contains("J1939")
-            val bcast = if (activeCan29Bit) "18DB33F1" else "7DF"
-            sendRawCommandInternal("ATSH $bcast")
-            return userProto.displayName
+            return applyProtocol(userProto)
+        }
+        return scanAndDetectCanBus()
+    }
+
+    suspend fun scanAndDetectCanBus(): String {
+        if (_isSimulationMode.value) {
+            delay(300)
+            _detectedCanBus.value = ElmProtocol.ISO_15765_29_250.displayName
+            return ElmProtocol.ISO_15765_29_250.displayName
         }
 
-        // Test candidate protocols in order of prevalence for Sitrak C7H / S7H / C9H / G7S:
-        // 1. ISO 15765-4 CAN 29-bit / 250k (ATSP9) - Standard for Bosch EDC17CV44, ZF TraXon, WABCO on Sitrak OBD connector
-        // 2. ISO 15765-4 CAN 29-bit / 500k (ATSP7) - High-speed powertrain CAN on newer Sitrak S7H / C9H
-        // 3. ISO 15765-4 CAN 11-bit / 500k (ATSP6) - Sitrak Cabin Gateway CBCU / VCU standard OBD-2 port
-        // 4. ISO 15765-4 CAN 11-bit / 250k (ATSP8)
-        // 5. SAE J1939 CAN 29-bit / 250k (ATSPA)
-        val protocolsToTest = listOf(
-            Triple(ElmProtocol.ISO_15765_29_250, "18DA00F1", true),
-            Triple(ElmProtocol.ISO_15765_29_250, "18DB33F1", true),
-            Triple(ElmProtocol.ISO_15765_29_500, "18DA00F1", true),
-            Triple(ElmProtocol.ISO_15765_29_500, "18DB33F1", true),
-            Triple(ElmProtocol.ISO_15765_11_500, "7E0", false),
-            Triple(ElmProtocol.ISO_15765_11_500, "7DF", false),
-            Triple(ElmProtocol.J1939_250K, "18DA00F1", true)
+        logTerminal("SCAN", "Глубокое сканирование шины CAN Sitrak (перебор 250k / 500k)...", true)
+
+        data class ProtocolCandidate(
+            val protocol: ElmProtocol,
+            val atCmd: String,
+            val is29: Boolean,
+            val bcast: String,
+            val physicalTargets: List<Pair<String, String>>
         )
 
-        for ((proto, header, is29) in protocolsToTest) {
-            sendRawCommandInternal("ATPC") // Clear any CAN error flags
-            sendRawCommandInternal(proto.atCommand)
-            sendRawCommandInternal("ATSH $header")
-            delay(50)
+        val candidates = listOf(
+            // 1. ISO 15765-4 CAN 29-bit / 250k (Default for Sitrak C7H / MC11 / MC13 / Bosch EDC17 / TraXon)
+            ProtocolCandidate(
+                protocol = ElmProtocol.ISO_15765_29_250,
+                atCmd = "ATSP9",
+                is29 = true,
+                bcast = "18DB33F1",
+                physicalTargets = listOf(
+                    "18DA00F1" to "18DAF100", // ECM
+                    "18DA21F1" to "18DAF121", // CBCU Gateway
+                    "18DA0BF1" to "18DAF10B", // EBS
+                    "18DA03F1" to "18DAF103"  // TCU TraXon
+                )
+            ),
+            // 2. ISO 15765-4 CAN 29-bit / 500k (High-speed bus on newer Sitrak S7H / C9H / WP12)
+            ProtocolCandidate(
+                protocol = ElmProtocol.ISO_15765_29_500,
+                atCmd = "ATSP7",
+                is29 = true,
+                bcast = "18DB33F1",
+                physicalTargets = listOf(
+                    "18DA00F1" to "18DAF100",
+                    "18DA21F1" to "18DAF121",
+                    "18DA0BF1" to "18DAF10B"
+                )
+            ),
+            // 3. ISO 15765-4 CAN 11-bit / 500k (Sitrak Cabin Gateway CBCU OBD-2 port)
+            ProtocolCandidate(
+                protocol = ElmProtocol.ISO_15765_11_500,
+                atCmd = "ATSP6",
+                is29 = false,
+                bcast = "7DF",
+                physicalTargets = listOf(
+                    "7E0" to "7E8", // ECM
+                    "7E3" to "7EB", // CBCU
+                    "7E2" to "7EA"  // EBS
+                )
+            ),
+            // 4. ISO 15765-4 CAN 11-bit / 250k
+            ProtocolCandidate(
+                protocol = ElmProtocol.ISO_15765_11_250,
+                atCmd = "ATSP8",
+                is29 = false,
+                bcast = "7DF",
+                physicalTargets = listOf(
+                    "7E0" to "7E8",
+                    "7E3" to "7EB"
+                )
+            ),
+            // 5. SAE J1939 CAN 29-bit / 250k
+            ProtocolCandidate(
+                protocol = ElmProtocol.J1939_250K,
+                atCmd = "ATSPA",
+                is29 = true,
+                bcast = "18DB33F1",
+                physicalTargets = listOf(
+                    "18DA00F1" to "18DAF100",
+                    "18DA21F1" to "18DAF121"
+                )
+            )
+        )
 
-            // Probe with UDS 10 01 (universally supported by all Sitrak ECUs), then 0100, then 010C
-            var resp = sendRawCommandInternal("10 01")
-            if (!isPositiveObdOrCanResponse(resp)) {
-                resp = sendRawCommandInternal("0100")
-            }
-            if (!isPositiveObdOrCanResponse(resp)) {
-                resp = sendRawCommandInternal("010C")
-            }
+        for (cand in candidates) {
+            try {
+                sendRawCommandInternal("ATPC") // Clear adapter bus error state
+                sendRawCommandInternal(cand.atCmd)
+                sendRawCommandInternal("ATST96") // 600ms timeout for slow truck gateways
+                sendRawCommandInternal("ATCRA") // Open receive filter (accept all)
+                delay(40)
 
-            if (isPositiveObdOrCanResponse(resp)) {
-                activeCan29Bit = is29
-                _detectedCanBus.value = proto.displayName
-                _isCanConnected.value = true
-                _ignitionDetected.value = true
-                logTerminal("CAN_INIT", "Шина CAN определена: ${proto.displayName} (Заголовок $header, ответ: $resp)", true)
-                return proto.displayName
-            }
-        }
+                // 1. Probe Functional Broadcast (wakes up any responding node on bus)
+                sendRawCommandInternal("ATSH ${cand.bcast}")
+                var bcastResp = sendRawCommandInternal("0100")
+                if (!isPositiveObdOrCanResponse(bcastResp)) {
+                    bcastResp = sendRawCommandInternal("10 01")
+                }
+                if (!isPositiveObdOrCanResponse(bcastResp)) {
+                    bcastResp = sendRawCommandInternal("3E 00")
+                }
 
-        // Try ELM327 native auto-protocol (ATSP0)
-        sendRawCommandInternal("ATPC")
-        sendRawCommandInternal("ATSP0")
-        sendRawCommandInternal("ATSH 18DA00F1")
-        var resp = sendRawCommandInternal("10 01")
-        if (!isPositiveObdOrCanResponse(resp)) {
-            resp = sendRawCommandInternal("0100")
-        }
-        if (!isPositiveObdOrCanResponse(resp)) {
-            resp = sendRawCommandInternal("010C")
-        }
-        if (isPositiveObdOrCanResponse(resp)) {
-            val protoDesc = sendRawCommandInternal("ATDP")
-            activeCan29Bit = protoDesc.contains("29") || protoDesc.contains("J1939")
-            _isCanConnected.value = true
-            _ignitionDetected.value = true
-            return "Автовыбор: $protoDesc"
+                if (isPositiveObdOrCanResponse(bcastResp)) {
+                    activeCan29Bit = cand.is29
+                    _selectedProtocol.value = cand.protocol
+                    _detectedCanBus.value = cand.protocol.displayName
+                    _isCanConnected.value = true
+                    _ignitionDetected.value = true
+                    val currentConn = _connectionState.value
+                    if (currentConn is ElmConnectionState.Connected) {
+                        _connectionState.value = currentConn.copy(protocol = cand.protocol.displayName)
+                    }
+                    logTerminal("CAN_OK", "Шина CAN определена (Broadcast): ${cand.protocol.displayName}, ответ: $bcastResp", true)
+                    return cand.protocol.displayName
+                }
+
+                // 2. Probe Physical ECU Headers (ECM, CBCU Gateway, EBS) with dedicated ATCRA filter
+                for ((hdr, filter) in cand.physicalTargets) {
+                    sendRawCommandInternal("ATSH $hdr")
+                    sendRawCommandInternal("ATCRA $filter")
+                    delay(30)
+
+                    var physResp = sendRawCommandInternal("10 01")
+                    if (!isPositiveObdOrCanResponse(physResp)) {
+                        physResp = sendRawCommandInternal("0100")
+                    }
+                    if (!isPositiveObdOrCanResponse(physResp)) {
+                        physResp = sendRawCommandInternal("3E 00")
+                    }
+                    if (!isPositiveObdOrCanResponse(physResp)) {
+                        physResp = sendRawCommandInternal("010C")
+                    }
+
+                    if (isPositiveObdOrCanResponse(physResp)) {
+                        activeCan29Bit = cand.is29
+                        _selectedProtocol.value = cand.protocol
+                        _detectedCanBus.value = cand.protocol.displayName
+                        _isCanConnected.value = true
+                        _ignitionDetected.value = true
+                        val currentConn = _connectionState.value
+                        if (currentConn is ElmConnectionState.Connected) {
+                            _connectionState.value = currentConn.copy(protocol = cand.protocol.displayName)
+                        }
+                        logTerminal("CAN_OK", "Шина CAN определена (ЭБУ $hdr): ${cand.protocol.displayName}, ответ: $physResp", true)
+                        return cand.protocol.displayName
+                    }
+                }
+            } catch (e: Exception) {
+                logTerminal("CAN_SCAN", "Ошибка проверки ${cand.protocol.displayName}: ${e.message}", false)
+            }
         }
 
         // Default to ISO 15765-4 (29-bit / 250k - ATSP9) for Sitrak S7H / C7H
         sendRawCommandInternal("ATSP9")
         sendRawCommandInternal("ATSH 18DA00F1")
+        sendRawCommandInternal("ATCRA")
         activeCan29Bit = true
+        _detectedCanBus.value = ElmProtocol.ISO_15765_29_250.displayName
         return ElmProtocol.ISO_15765_29_250.displayName
     }
 
@@ -861,11 +989,44 @@ class Elm327Manager(private val context: Context) {
 
         sendRawCommandInternal("ATST64") // Standard 400ms timeout for truck ECUs
 
+        // 1. Fast Broadcast Check with Headers ON to detect all responding ECUs in parallel
+        try {
+            sendRawCommandInternal("ATH1")
+            sendRawCommandInternal("ATCRA") // Open filter
+            val bcastHeader = if (activeCan29Bit) "18DB33F1" else "7DF"
+            sendRawCommandInternal("ATSH $bcastHeader")
+            delay(40)
+            val bcastResp = sendRawCommandInternal("0100")
+            val bcastUpper = bcastResp.uppercase(Locale.ROOT).replace(" ", "")
+
+            for (mod in TruckModule.entries) {
+                val f29 = mod.response29Filter.replace(" ", "")
+                val f11 = mod.response11Filter.replace(" ", "")
+                if (bcastUpper.contains(f29) || bcastUpper.contains(f11)) {
+                    anyOnline = true
+                    updatedStates[mod] = EcuModuleState(
+                        module = mod,
+                        status = EcuStatus.ONLINE,
+                        pingMs = 42L,
+                        activeDtcCount = 0,
+                        responseSummary = "В сети (CAN Broadcast)"
+                    )
+                }
+            }
+            sendRawCommandInternal("ATH0")
+        } catch (_: Exception) {
+            sendRawCommandInternal("ATH0")
+        }
+
+        // 2. Physical query for each module with matching ATSH and dedicated ATCRA filter
         for (module in TruckModule.entries) {
             val startPing = System.currentTimeMillis()
             val header = if (activeCan29Bit) module.can29Header else module.canId
+            val filter = if (activeCan29Bit) module.response29Filter else module.response11Filter
+
             sendRawCommandInternal("ATSH $header")
-            delay(40)
+            sendRawCommandInternal("ATCRA $filter")
+            delay(35)
 
             // 1. Probe with UDS 10 01 (Default Diagnostic Session)
             var resp = sendRawCommandInternal("10 01")
@@ -899,7 +1060,7 @@ class Elm327Manager(private val context: Context) {
                     activeDtcCount = dtcs.size,
                     responseSummary = "В сети (${ping}мс): ${resp.take(24)}"
                 )
-            } else {
+            } else if (!updatedStates.containsKey(module)) {
                 updatedStates[module] = EcuModuleState(
                     module = module,
                     status = EcuStatus.OFFLINE,
@@ -910,6 +1071,11 @@ class Elm327Manager(private val context: Context) {
                 )
             }
         }
+
+        // Restore ECM header and clear CRA filter
+        val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
+        sendRawCommandInternal("ATSH $ecmHeader")
+        sendRawCommandInternal("ATCRA")
 
         _ecuStates.value = updatedStates
         _isCanConnected.value = anyOnline
@@ -929,8 +1095,11 @@ class Elm327Manager(private val context: Context) {
 
         for (module in TruckModule.entries) {
             val header = if (activeCan29Bit) module.can29Header else module.canId
+            val filter = if (activeCan29Bit) module.response29Filter else module.response11Filter
+
             sendRawCommandInternal("ATSH $header")
-            delay(80)
+            sendRawCommandInternal("ATCRA $filter")
+            delay(50)
 
             // 1. Standard Mode 03
             val resp03 = sendRawCommandInternal("03")
@@ -953,6 +1122,10 @@ class Elm327Manager(private val context: Context) {
             )
         }
 
+        val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
+        sendRawCommandInternal("ATSH $ecmHeader")
+        sendRawCommandInternal("ATCRA")
+
         _ecuStates.value = updatedStates
         return allFaults
     }
@@ -967,20 +1140,27 @@ class Elm327Manager(private val context: Context) {
         // 1. Broadcast Clear
         val bcast = if (activeCan29Bit) "18DB33F1" else "7DF"
         sendRawCommandInternal("ATSH $bcast")
+        sendRawCommandInternal("ATCRA")
         sendRawCommandInternal("04")
         sendRawCommandInternal("14 FF FF FF")
 
-        // 2. Clear each ECU individually
+        // 2. Clear each ECU individually with matching ATSH and ATCRA filter
         for (module in TruckModule.entries) {
             val header = if (activeCan29Bit) module.can29Header else module.canId
+            val filter = if (activeCan29Bit) module.response29Filter else module.response11Filter
             sendRawCommandInternal("ATSH $header")
-            delay(50)
+            sendRawCommandInternal("ATCRA $filter")
+            delay(40)
             val r1 = sendRawCommandInternal("04")
             val r2 = sendRawCommandInternal("14 FF FF FF")
             if (isPositiveObdOrCanResponse(r1) || isPositiveObdOrCanResponse(r2)) {
                 anyCleared = true
             }
         }
+
+        val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
+        sendRawCommandInternal("ATSH $ecmHeader")
+        sendRawCommandInternal("ATCRA")
         return anyCleared
     }
 

@@ -204,7 +204,8 @@ fun SitrakMainScreen(
                     connectionState = connectionState,
                     onDiagnoseEcusRequested = { viewModel.testAndDiagnoseEcus() },
                     onToggleSimulation = { viewModel.setSimulationMode(it) },
-                    onSelectProtocol = { viewModel.setProtocol(it) }
+                    onSelectProtocol = { viewModel.setProtocol(it) },
+                    onScanCanBus = { viewModel.scanAndDetectCanBus() }
                 )
 
                 DiagnosticTab.DTC -> DtcScreen(

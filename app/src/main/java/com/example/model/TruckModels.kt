@@ -11,7 +11,19 @@ enum class TruckModule(
     TCU("TCU", "АКПП ZF TraXon", "7E1", "18DA03F1", 0x03),
     EBS("EBS", "Тормозная система WABCO", "7E2", "18DA0BF1", 0x0B),
     SCR("SCR", "Нейтрализация AdBlue / DPF", "7E4", "18DA3DF1", 0x3D),
-    CBCU("CBCU", "Кузовная электроника VCU", "7E3", "18DA21F1", 0x21)
+    CBCU("CBCU", "Кузовная электроника VCU", "7E3", "18DA21F1", 0x21);
+
+    val response29Filter: String
+        get() = String.format(java.util.Locale.US, "18DAF1%02X", j1939Sa)
+
+    val response11Filter: String
+        get() = when (this) {
+            ECM -> "7E8"
+            TCU -> "7E9"
+            EBS -> "7EA"
+            CBCU -> "7EB"
+            SCR -> "7EC"
+        }
 }
 
 enum class EcuStatus {
@@ -161,6 +173,7 @@ enum class ElmProtocol(
     J1939_250K("J1939_250", "ATSPA", "SAE J1939 CAN (29 бит / 250k)", "Основной стандарт Sitrak S7H / C7H"),
     J1939_500K("J1939_500", "ATSPB", "SAE J1939 CAN (29 бит / 500k)", "Высокоскоростная шина грузовиков"),
     ISO_15765_11_500("ISO_11_500", "ATSP6", "ISO 15765-4 CAN (11 бит / 500k)", "Стандарт OBD-II / Bosch EDC17"),
+    ISO_15765_11_250("ISO_11_250", "ATSP8", "ISO 15765-4 CAN (11 бит / 250k)", "11-битная шина CAN 250k"),
     ISO_15765_29_500("ISO_29_500", "ATSP7", "ISO 15765-4 CAN (29 бит / 500k)", "29-битная шина CAN 500k"),
     ISO_15765_29_250("ISO_29_250", "ATSP9", "ISO 15765-4 CAN (29 бит / 250k)", "29-битная шина CAN 250k")
 }
