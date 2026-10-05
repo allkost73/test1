@@ -30,8 +30,10 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RotateLeft
 import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
@@ -112,6 +114,8 @@ fun TuningScreen(
     onAdjustSteeringOffset: (Float) -> Unit = {},
     onSimulateSteeringAngle: (Float) -> Unit = {},
     onClearEbsStopFault: () -> Unit = {},
+    detectedSasInfo: String? = null,
+    onScanSteeringSensor: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var tempSpeedLimit by remember(truckConfig.speedLimitKmH) { mutableFloatStateOf(truckConfig.speedLimitKmH.toFloat()) }
@@ -452,7 +456,7 @@ fun TuningScreen(
                             color = TextSecondary
                         )
                         Text(
-                            text = "WABCO EBS (0x0B / 18DA0BF1)",
+                            text = detectedSasInfo ?: "WABCO EBS (0x0B / 18DA0BF1)",
                             style = MaterialTheme.typography.labelSmall.copy(
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.SemiBold
@@ -477,6 +481,36 @@ fun TuningScreen(
                             ),
                             color = if (isAngleInZeroZone) GaugeGreen else GaugeYellow
                         )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Action buttons for SAS sensor scan and EBS reset
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onScanSteeringSensor,
+                        colors = ButtonDefaults.buttonColors(containerColor = TelemetryCyan),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(imageVector = Icons.Default.Search, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Найти датчик SAS", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Button(
+                        onClick = onClearEbsStopFault,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF21262D)),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Refresh, contentDescription = null, tint = SitrakOrange, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Сброс EBS", color = SitrakOrange, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 

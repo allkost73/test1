@@ -128,6 +128,7 @@ fun SitrakMainScreen(
     val isWritingCalibration by viewModel.isWritingCalibration.collectAsState()
     val isCalibratingSteering by viewModel.isCalibratingSteering.collectAsState()
     val hasScannedRealTruck by viewModel.hasScannedRealTruck.collectAsState()
+    val detectedSasInfo by viewModel.detectedSasInfo.collectAsState()
 
     // Bluetooth Permissions Launcher for Android 12+ and Android <= 11
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -255,7 +256,9 @@ fun SitrakMainScreen(
                     onResetSteeringCalibration = { viewModel.resetSteeringCalibration() },
                     onAdjustSteeringOffset = { viewModel.adjustSteeringOffset(it) },
                     onSimulateSteeringAngle = { viewModel.setSimulatedSteeringAngle(it) },
-                    onClearEbsStopFault = { viewModel.clearEbsStopFault() }
+                    onClearEbsStopFault = { viewModel.clearEbsStopFault() },
+                    detectedSasInfo = detectedSasInfo,
+                    onScanSteeringSensor = { viewModel.scanAndLockSteeringSensor() }
                 )
 
                 DiagnosticTab.TERMINAL -> TerminalScreen(

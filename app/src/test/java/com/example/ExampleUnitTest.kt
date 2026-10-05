@@ -52,5 +52,44 @@ class ExampleUnitTest {
     assertNotNull(angleWithHeader)
     assertEquals(0.0f, angleWithHeader!!, 0.1f)
   }
+
+  @Test
+  fun testParseSteeringAngle_j1939Pgn61469() {
+    // PGN 61469 (F01D), SA 0x13, Data: 00 7D -> 0x7D00 = 0.0°
+    val zeroPgn = Elm327Manager.parseSteeringAngle("0CF01D13 08 00 7D 00 00 00 00 00 00")
+    assertNotNull(zeroPgn)
+    assertEquals(0.0f, zeroPgn!!, 0.1f)
+
+    // Data: 3C 7D -> Little Endian 0x7D3C (32060) -> (32060 - 32000) * 0.05 = +3.0°
+    val rightPgn = Elm327Manager.parseSteeringAngle("0CF01D13 08 3C 7D 00 00 00 00 00 00")
+    assertNotNull(rightPgn)
+    assertEquals(3.0f, rightPgn!!, 0.1f)
+
+    // Data: C4 7C -> Little Endian 0x7CC4 (31940) -> (31940 - 32000) * 0.05 = -3.0°
+    val leftPgn = Elm327Manager.parseSteeringAngle("0CF01D13 08 C4 7C 00 00 00 00 00 00")
+    assertNotNull(leftPgn)
+    assertEquals(-3.0f, leftPgn!!, 0.1f)
+  }
+
+  @Test
+  fun testParseSteeringAngle_kwp2000() {
+    val kwpAngle = Elm327Manager.parseSteeringAngle("61 0A 7D 3C")
+    assertNotNull(kwpAngle)
+    assertEquals(3.0f, kwpAngle!!, 0.1f)
+  }
+
+  @Test
+  fun testParseSteeringAngle_udsLittleEndian() {
+    val leAngle = Elm327Manager.parseSteeringAngle("62 01 0A 3C 7D")
+    assertNotNull(leAngle)
+    assertEquals(3.0f, leAngle!!, 0.1f)
+  }
+
+  @Test
+  fun testParseSteeringAngle_cbcuGateway() {
+    val cbcuAngle = Elm327Manager.parseSteeringAngle("62 D0 01 7D 3C")
+    assertNotNull(cbcuAngle)
+    assertEquals(3.0f, cbcuAngle!!, 0.1f)
+  }
 }
 

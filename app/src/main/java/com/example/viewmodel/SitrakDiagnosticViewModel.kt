@@ -77,6 +77,8 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     private val _isCalibratingSteering = MutableStateFlow(false)
     val isCalibratingSteering: StateFlow<Boolean> = _isCalibratingSteering.asStateFlow()
 
+    val detectedSasInfo: StateFlow<String?> = elmManager.detectedSasInfo
+
     private val _selectedModuleFilter = MutableStateFlow<TruckModule?>(null)
     val selectedModuleFilter: StateFlow<TruckModule?> = _selectedModuleFilter.asStateFlow()
 
@@ -414,6 +416,14 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
 
     fun setSimulatedSteeringAngle(angleDeg: Float) {
         elmManager.setSimulatedSteeringAngle(angleDeg)
+    }
+
+    fun scanAndLockSteeringSensor() {
+        viewModelScope.launch {
+            _statusNotice.value = "Поиск активного канала датчика угла руля SAS в шине CAN..."
+            val result = elmManager.probeAndLockSteeringAngleSensor()
+            _statusNotice.value = result
+        }
     }
 
     fun triggerDpfRegeneration() {
