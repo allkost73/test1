@@ -91,5 +91,21 @@ class ExampleUnitTest {
     assertNotNull(cbcuAngle)
     assertEquals(3.0f, cbcuAngle!!, 0.1f)
   }
+
+  @Test
+  fun testParseSteeringAngle_rawCanPayloads() {
+    // 8-byte raw CAN broadcast payload with headers OFF (ATH0)
+    val rightRaw = Elm327Manager.parseSteeringAngle("3C 7D 00 00 00 00 00 00")
+    assertNotNull(rightRaw)
+    assertEquals(3.0f, rightRaw!!, 0.1f)
+
+    val leftRaw = Elm327Manager.parseSteeringAngle("C4 7C 00 00 00 00 00 00")
+    assertNotNull(leftRaw)
+    assertEquals(-3.0f, leftRaw!!, 0.1f)
+
+    val centerRaw = Elm327Manager.parseSteeringAngle("00 7D 00 00 00 00 00 00")
+    assertNotNull(centerRaw)
+    assertEquals(0.0f, centerRaw!!, 0.1f)
+  }
 }
 
