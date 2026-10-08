@@ -801,8 +801,14 @@ class Elm327Manager(private val context: Context) {
 
                         if (detectedSasHeader != null) {
                             if (isSasJ1939PgnMode) {
-                                val frame = sniffCanFrame(detectedSasHeader ?: "0CF01D13", 80L)
-                                val parsed = parseSteeringAngle(frame)
+                                var frame = if (detectedSasCmd?.startsWith("ATMP") == true) {
+                                    sendRawCommandInternal("ATMP F01D 1", 120L)
+                                } else ""
+                                var parsed = parseSteeringAngle(frame)
+                                if (parsed == null) {
+                                    frame = sniffCanFrame(detectedSasHeader ?: "0CF01D13", 80L)
+                                    parsed = parseSteeringAngle(frame)
+                                }
                                 if (parsed != null) {
                                     rawSteer = parsed
                                     steerDeg = rawSteer + steeringOffset
@@ -847,10 +853,14 @@ class Elm327Manager(private val context: Context) {
                         steerDeg = simulatedSteeringAngle + steeringOffset
                     }
 
-                    // 3. Poll Speed (010D)
-                    val speedRaw = sendRawCommandInternal("010D", 300L)
-                    val speed = parseSpeed(speedRaw)
-                    delay(15)
+                    // 3. Poll Speed (010D) only every 2 ticks
+                    var speed = _telemetry.value.speedKmH
+                    if (pollTick % 2 == 0) {
+                        val speedRaw = sendRawCommandInternal("010D", 200L)
+                        val s = parseSpeed(speedRaw)
+                        if (s >= 0) speed = s
+                        delay(10)
+                    }
 
                     // 4. Interleaved Secondary Sensor Polling (Paced to maintain 4-5 Hz real-time steering response)
                     var temp = -100f
@@ -1443,40 +1453,66 @@ class Elm327Manager(private val context: Context) {
         withContext(Dispatchers.IO) {
             val out = outputStream ?: return@withContext "NO DATA"
             try {
-                // Set hardware filter to only accept this CAN ID
+                // 1. Set hardware filter for this specific CAN ID
                 synchronized(rxLock) { rxBuffer.clear() }
                 out.write("ATCRA $header\r".toByteArray(Charsets.US_ASCII))
                 out.flush()
-                delay(20)
 
-                // Start monitoring frames
+                // Wait up to 150ms for ATCRA confirmation prompt '>'
+                val filterStart = System.currentTimeMillis()
+                while (System.currentTimeMillis() - filterStart < 150L) {
+                    if (!coroutineContext.isActive) break
+                    val hasPrompt = synchronized(rxLock) { rxBuffer.contains(">") }
+                    if (hasPrompt) break
+                    delay(5)
+                }
+
+                // 2. Clear buffer before monitoring frames
                 synchronized(rxLock) { rxBuffer.clear() }
+
+                // 3. Start monitoring frames
                 out.write("ATMA\r".toByteArray(Charsets.US_ASCII))
                 out.flush()
 
-                // Wait up to durationMs for frame to arrive in rxBuffer
+                // 4. Wait for real incoming CAN frame
                 val startTime = System.currentTimeMillis()
+                var captured = ""
+
                 while (System.currentTimeMillis() - startTime < durationMs) {
                     if (!coroutineContext.isActive) break
                     synchronized(rxLock) {
-                        if (rxBuffer.contains(header) || rxBuffer.length >= 18) {
-                            return@withContext rxBuffer.toString()
+                        val text = rxBuffer.toString()
+                        val line = text.lines().firstOrNull { l ->
+                            val clean = l.replace(" ", "").uppercase(Locale.ROOT)
+                            clean.contains("F01D") && clean.length >= 16
+                        }
+                        if (line != null) {
+                            captured = line
                         }
                     }
+                    if (captured.isNotEmpty()) break
                     delay(8)
                 }
 
-                // Stop ATMA with space character
+                // 5. ALWAYS stop ATMA by sending a space character
                 out.write(" \r".toByteArray(Charsets.US_ASCII))
                 out.flush()
                 delay(15)
 
-                // Restore automatic filter
+                // 6. ALWAYS restore automatic receive filter
+                synchronized(rxLock) { rxBuffer.clear() }
                 out.write("ATAR\r".toByteArray(Charsets.US_ASCII))
                 out.flush()
                 delay(15)
 
-                synchronized(rxLock) { rxBuffer.toString() }
+                if (captured.isNotEmpty()) {
+                    captured
+                } else {
+                    synchronized(rxLock) {
+                        val text = rxBuffer.toString()
+                        text.lines().firstOrNull { it.contains("F01D", ignoreCase = true) } ?: "NO DATA"
+                    }
+                }
             } catch (_: Exception) {
                 try {
                     out.write(" \rATAR\r".toByteArray(Charsets.US_ASCII))
