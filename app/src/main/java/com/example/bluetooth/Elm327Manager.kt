@@ -53,19 +53,53 @@ class Elm327Manager(private val context: Context) {
 
         fun parseSteeringAngle(response: String): Float? {
             return try {
-                val clean = response.replace(">", "").replace("\r", " ").replace("\n", " ").trim().uppercase(Locale.ROOT)
+                var clean = response.replace(">", "").replace("\r", " ").replace("\n", " ").trim().uppercase(Locale.ROOT)
                 if (clean.isEmpty() || clean.contains("NODATA") || clean.contains("NO DATA") || 
                     clean.contains("ERROR") || clean.contains("STOPPED") || 
-                    clean.contains("UNABLE") || clean.contains("BUFFER FULL")) {
+                    clean.contains("UNABLE") || clean.contains("BUFFER FULL") ||
+                    clean.contains("?") || clean.contains("BUS INIT") || clean.contains("SEARCHING")) {
+                    return null
+                }
+
+                // Strictly reject command echoes and AT responses
+                if (clean.contains("ATCRA") || clean.contains("ATMP") || clean.contains("ATSH") ||
+                    clean.contains("ATAR") || clean.contains("ATZ") || clean.contains("ATWS") ||
+                    clean.contains("ATE0") || clean.contains("ATH0") || clean.contains("ATSP")) {
                     return null
                 }
 
                 val noSpaces = clean.replace(" ", "")
 
-                // 1. J1939 broadcast frame PGN 61469 (0xF01D / SPN 1807 Steering Wheel Angle)
+                // Strictly reject UDS Negative Responses (NRC e.g. 7F 22 31, 7F 10 7E)
+                if (clean.startsWith("7F ") || noSpaces.startsWith("7F") || clean.contains(" 7F ") ||
+                    noSpaces.contains("7F22") || noSpaces.contains("7F10") || noSpaces.contains("7F31")) {
+                    return null
+                }
+
+                // 1. UDS Service 0x22 (Positive response: 62 [2-byte DID] [Data...])
+                // e.g. "62 01 0A 7D 00", "62 01 0A 7D 3C", "62 02 00 00 28", "18DAF10B 05 62 01 0A 7D 00"
+                val udsRegex = Regex("""62([0-9A-F]{4})([0-9A-F]{4,32})""")
+                val udsMatch = udsRegex.find(noSpaces)
+                if (udsMatch != null) {
+                    val dataHex = udsMatch.groupValues[2]
+                    val deg = extractSteeringFromHexPayload(dataHex)
+                    if (deg != null) return deg
+                }
+
+                // 2. KWP2000 Service 0x21 (Positive response: 61 [1-byte LID] [Data...])
+                // e.g. "61 0A 7D 00", "61 0A 3C 7D", "61 02 00 28", "18DAF10B 04 61 0A 7D 00"
+                val kwpRegex = Regex("""61([0-9A-F]{2})([0-9A-F]{4,32})""")
+                val kwpMatch = kwpRegex.find(noSpaces)
+                if (kwpMatch != null) {
+                    val dataHex = kwpMatch.groupValues[2]
+                    val deg = extractSteeringFromHexPayload(dataHex)
+                    if (deg != null) return deg
+                }
+
+                // 3. J1939 broadcast frame PGN 61469 (0xF01D / SPN 1807 Steering Wheel Angle)
                 // Frame format: [Priority][F01D][SourceAddress] [DLC]? [Byte0] [Byte1] ...
                 // Examples: "0CF01D13 08 00 7D 00 00 ...", "0CF01D13 08 3C 7D ...", "18F01D13 08 3C 7D ..."
-                val j1939Regex = Regex("""(?:0C|18)F01D([0-9A-F]{2})\s*(?:08)?\s*([0-9A-F]{2})\s*([0-9A-F]{2})""")
+                val j1939Regex = Regex("""(?:0C|18)F01D([0-9A-F]{2})\s*(?:08)?\s*([0-9A-F]{2})\s*([0-9A-F]{2})\s*([0-9A-F]{2})""")
                 val j1939Match = j1939Regex.find(clean)
                 if (j1939Match != null) {
                     val b0 = j1939Match.groupValues[2].toInt(16)
@@ -77,8 +111,8 @@ class Elm327Manager(private val context: Context) {
                     if (degBe != null) return degBe
                 }
 
-                // Also check without spaces
-                val j1939NoSpaceRegex = Regex("""(?:0C|18)F01D([0-9A-F]{2})(?:08)?([0-9A-F]{2})([0-9A-F]{2})""")
+                // Also check without spaces for J1939
+                val j1939NoSpaceRegex = Regex("""(?:0C|18)F01D([0-9A-F]{2})(?:08)?([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})""")
                 val j1939NsMatch = j1939NoSpaceRegex.find(noSpaces)
                 if (j1939NsMatch != null) {
                     val b0 = j1939NsMatch.groupValues[2].toInt(16)
@@ -87,26 +121,6 @@ class Elm327Manager(private val context: Context) {
                     if (degLe != null) return degLe
                     val degBe = decodeSteeringFromBytes(b0, b1)
                     if (degBe != null) return degBe
-                }
-
-                // 2. UDS Service 0x22 (Positive response: 62 [2-byte DID] [Data...])
-                // e.g. "62 01 0A 7D 00", "62 01 0A 7D 3C", "62 02 00 00 28", "18DAF10B 05 62 01 0A 7D 00"
-                val udsRegex = Regex("""62([0-9A-F]{4})([0-9A-F]{4,32})""")
-                val udsMatch = udsRegex.find(noSpaces)
-                if (udsMatch != null) {
-                    val dataHex = udsMatch.groupValues[2]
-                    val deg = extractSteeringFromHexPayload(dataHex)
-                    if (deg != null) return deg
-                }
-
-                // 3. KWP2000 Service 0x21 (Positive response: 61 [1-byte LID] [Data...])
-                // e.g. "61 0A 7D 00", "61 0A 3C 7D", "61 02 00 28", "18DAF10B 04 61 0A 7D 00"
-                val kwpRegex = Regex("""61([0-9A-F]{2})([0-9A-F]{4,32})""")
-                val kwpMatch = kwpRegex.find(noSpaces)
-                if (kwpMatch != null) {
-                    val dataHex = kwpMatch.groupValues[2]
-                    val deg = extractSteeringFromHexPayload(dataHex)
-                    if (deg != null) return deg
                 }
 
                 // 4. OBD-II Mode 01 (Positive response: 41 [1-byte PID] [Data...])
@@ -118,8 +132,9 @@ class Elm327Manager(private val context: Context) {
                     if (deg != null) return deg
                 }
 
-                // 5. Raw CAN payload without CAN ID header (e.g. "3C 7D 00 00 00 00 00 00" or "00 7D 00 00 00 00 00 00")
-                if (noSpaces.length in 12..18 && noSpaces.matches(Regex("""[0-9A-F]+"""))) {
+                // 5. Raw CAN broadcast payload with headers OFF (ATH0) (exactly 16 hex chars = 8 bytes)
+                // e.g. "3C 7D 00 00 00 00 00 00" or "00 7D 00 00 00 00 00 00"
+                if (noSpaces.length == 16 && noSpaces.matches(Regex("""[0-9A-F]{16}"""))) {
                     val deg = extractSteeringFromHexPayload(noSpaces)
                     if (deg != null) return deg
                 }
@@ -144,61 +159,61 @@ class Elm327Manager(private val context: Context) {
             }
             if (bytes.size < 2) return null
 
-            // Direct 2-byte payload optimization
-            if (bytes.size == 2) {
-                // 1. Try J1939 Big-Endian (Center 32000 = 0x7D00)
-                val rawBe = (bytes[0] shl 8) or bytes[1]
-                if (rawBe in 16000..48000) {
-                    val deg = (rawBe - 32000) * 0.05f
-                    if (abs(deg) <= 800f) return deg
-                }
-                // 2. Try J1939 Little-Endian
-                val rawLe = (bytes[1] shl 8) or bytes[0]
-                if (rawLe in 16000..48000) {
-                    val deg = (rawLe - 32000) * 0.05f
-                    if (abs(deg) <= 800f) return deg
-                }
-                // 3. Try Signed 16-bit
-                val rawShort = rawBe.toShort()
-                if (rawShort == 0.toShort()) return 0.0f
-                val deg01 = rawShort / 10.0f
-                if (abs(deg01) <= 800f && abs(deg01) >= 0.5f) return deg01
-                val deg005 = rawShort * 0.05f
-                if (abs(deg005) <= 800f && abs(deg005) >= 0.5f) return deg005
+            // 1. First check the primary data bytes (bytes[0] and bytes[1])
+            val rawBe0 = (bytes[0] shl 8) or bytes[1]
+            val rawLe0 = (bytes[1] shl 8) or bytes[0]
 
-                val rawShortLe = rawLe.toShort()
+            val degBe0 = if (rawBe0 in 14000..50000) (rawBe0 - 32000) * 0.05f else null
+            val degLe0 = if (rawLe0 in 14000..50000) (rawLe0 - 32000) * 0.05f else null
+
+            val chosen0 = when {
+                degBe0 != null && degLe0 != null -> if (abs(degBe0) <= abs(degLe0)) degBe0 else degLe0
+                degBe0 != null -> degBe0
+                degLe0 != null -> degLe0
+                else -> null
+            }
+            if (chosen0 != null && abs(chosen0) <= 850f) return chosen0
+
+            // Direct 2-byte payload signed fallback
+            if (bytes.size == 2) {
+                val rawShortBe = rawBe0.toShort()
+                val rawShortLe = rawLe0.toShort()
+                if (rawShortBe == 0.toShort() || rawShortLe == 0.toShort()) return 0.0f
+
+                val deg01Be = rawShortBe / 10.0f
                 val deg01Le = rawShortLe / 10.0f
-                if (abs(deg01Le) <= 800f && abs(deg01Le) >= 0.5f) return deg01Le
+                if (abs(deg01Be) in 0.2f..850f) return deg01Be
+                if (abs(deg01Le) in 0.2f..850f) return deg01Le
 
                 return null
             }
 
             // Multi-byte payload:
-            // Pass 1: Look for J1939 format (Center 32000 = 0x7D00)
-            var j1939Zero: Float? = null
-            for (idx in 0 until bytes.size - 1) {
+            // Pass 1: Look for J1939 format at other offsets
+            var bestJ1939: Float? = null
+            for (idx in 1 until bytes.size - 1) {
                 val b0 = bytes[idx]
                 val b1 = bytes[idx + 1]
 
                 val rawBe = (b0 shl 8) or b1
-                if (rawBe in 16000..48000) {
-                    val deg = (rawBe - 32000) * 0.05f
-                    if (abs(deg) <= 800f) {
-                        if (abs(deg) > 0.05f) return deg
-                        j1939Zero = 0.0f
-                    }
-                }
-
                 val rawLe = (b1 shl 8) or b0
-                if (rawLe in 16000..48000) {
-                    val deg = (rawLe - 32000) * 0.05f
-                    if (abs(deg) <= 800f) {
-                        if (abs(deg) > 0.05f) return deg
-                        j1939Zero = 0.0f
+
+                val degBe = if (rawBe in 14000..50000) (rawBe - 32000) * 0.05f else null
+                val degLe = if (rawLe in 14000..50000) (rawLe - 32000) * 0.05f else null
+
+                val cand = when {
+                    degBe != null && degLe != null -> if (abs(degBe) <= abs(degLe)) degBe else degLe
+                    degBe != null -> degBe
+                    degLe != null -> degLe
+                    else -> null
+                }
+                if (cand != null && abs(cand) <= 850f) {
+                    if (bestJ1939 == null || abs(cand) < abs(bestJ1939)) {
+                        bestJ1939 = cand
                     }
                 }
             }
-            if (j1939Zero != null) return j1939Zero
+            if (bestJ1939 != null) return bestJ1939
 
             // Pass 2: Look for Signed 16-bit integer (Non-zero)
             for (idx in 0 until bytes.size - 1) {
@@ -208,21 +223,24 @@ class Elm327Manager(private val context: Context) {
                 val rawBe = ((b0 shl 8) or b1).toShort()
                 if (rawBe != 0.toShort()) {
                     val deg01 = rawBe / 10.0f
-                    if (abs(deg01) <= 800f && abs(deg01) >= 0.5f) return deg01
+                    if (abs(deg01) <= 850f && abs(deg01) >= 0.5f) return deg01
                     val deg005 = rawBe * 0.05f
-                    if (abs(deg005) <= 800f && abs(deg005) >= 0.5f) return deg005
+                    if (abs(deg005) <= 850f && abs(deg005) >= 0.5f) return deg005
                 }
 
                 val rawLe = ((b1 shl 8) or b0).toShort()
                 if (rawLe != 0.toShort()) {
                     val deg01 = rawLe / 10.0f
-                    if (abs(deg01) <= 800f && abs(deg01) >= 0.5f) return deg01
+                    if (abs(deg01) <= 850f && abs(deg01) >= 0.5f) return deg01
                     val deg005 = rawLe * 0.05f
-                    if (abs(deg005) <= 800f && abs(deg005) >= 0.5f) return deg005
+                    if (abs(deg005) <= 850f && abs(deg005) >= 0.5f) return deg005
                 }
             }
 
-            if (bytes.size >= 2 && bytes[0] == 0 && bytes[1] == 0) return 0.0f
+            // Signed 16-bit zero (00 00) for standard 4-byte UDS payloads like 02 00 00 00
+            if (bytes.size >= 4 && bytes[bytes.size - 2] == 0 && bytes[bytes.size - 1] == 0) {
+                return 0.0f
+            }
 
             return null
         }
@@ -274,6 +292,22 @@ class Elm327Manager(private val context: Context) {
                 if (abs(degSigned005) <= 800f) return degSigned005
                 null
             } catch (_: Exception) { null }
+        }
+
+        fun isEcuAliveResponse(resp: String): Boolean {
+            val clean = resp.replace(">", "").replace("\r", " ").replace("\n", " ").trim()
+            if (clean.isEmpty() || clean.contains("NO DATA") || clean.contains("ERROR") ||
+                clean.contains("UNABLE TO CONNECT") || clean.contains("BUS INIT: ... ERROR") ||
+                clean.contains("?") || clean.contains("STOPPED") || clean.contains("BUFFER FULL")) {
+                return false
+            }
+            val upper = clean.uppercase(Locale.ROOT)
+            val noSpaces = clean.replace(" ", "").uppercase(Locale.ROOT)
+            return upper.contains("50 ") || upper.contains("7E ") || upper.contains("59 ") ||
+                    upper.contains("41 ") || upper.contains("43 ") || upper.contains("62 ") ||
+                    upper.contains("7F ") || noSpaces.startsWith("50") || noSpaces.startsWith("7E") ||
+                    noSpaces.startsWith("59") || noSpaces.startsWith("41") || noSpaces.startsWith("43") ||
+                    noSpaces.startsWith("62") || noSpaces.startsWith("7F") || noSpaces.contains("OK")
         }
     }
 
@@ -464,7 +498,9 @@ class Elm327Manager(private val context: Context) {
             activeCan29Bit = protocol.code.contains("29") || protocol.code.contains("J1939") || protocol == ElmProtocol.AUTO
             val bcast = if (activeCan29Bit) "18DB33F1" else "7DF"
             sendRawCommandInternal("ATSH $bcast")
-            sendRawCommandInternal("ATAR") // Reset receive filter to automatic
+            if (!activeCan29Bit) {
+                sendRawCommandInternal("ATAR")
+            }
             sendRawCommandInternal("ATST64")
             _detectedCanBus.value = protocol.displayName
             val currentConn = _connectionState.value
@@ -759,6 +795,9 @@ class Elm327Manager(private val context: Context) {
         pollingJob?.cancel()
         pollingJob = scope.launch {
             var pollTick = 0
+            var activeEcmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
+            var currentHeader = ""
+
             while (isActive) {
                 if (isRoutineInProgress) {
                     delay(150)
@@ -766,15 +805,34 @@ class Elm327Manager(private val context: Context) {
                 }
                 try {
                     pollTick++
-                    // Set CAN header to ECM (Engine Bosch EDC17CV44 / MC11-MC13)
-                    val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
-                    sendRawCommandInternal("ATSH $ecmHeader", 150L)
-                    delay(15)
 
-                    // 1. Poll RPM (010C)
-                    val rpmRaw = sendRawCommandInternal("010C", 300L)
-                    val rpm = parseRpm(rpmRaw)
-                    val ecmResponded = isPositiveObdOrCanResponse(rpmRaw)
+                    // 1. Maintain active ECM Header without constant switching
+                    if (currentHeader != activeEcmHeader) {
+                        sendRawCommandInternal("ATSH $activeEcmHeader", 400L)
+                        currentHeader = activeEcmHeader
+                    }
+
+                    // 2. Poll RPM (010C)
+                    val rpmRaw = sendRawCommandInternal("010C", 600L)
+                    var rpm = parseRpm(rpmRaw)
+                    var ecmResponded = rpm >= 0
+
+                    // If physical header didn't answer, try functional broadcast 18DB33F1 on tick 4
+                    if (!ecmResponded && pollTick % 4 == 0) {
+                        val bcast = if (activeCan29Bit) "18DB33F1" else "7DF"
+                        sendRawCommandInternal("ATSH $bcast", 400L)
+                        currentHeader = bcast
+                        val bcastRpmRaw = sendRawCommandInternal("010C", 600L)
+                        val bRpm = parseRpm(bcastRpmRaw)
+                        if (bRpm >= 0) {
+                            rpm = bRpm
+                            ecmResponded = true
+                            activeEcmHeader = bcast
+                        } else {
+                            sendRawCommandInternal("ATSH $activeEcmHeader", 400L)
+                            currentHeader = activeEcmHeader
+                        }
+                    }
 
                     if (ecmResponded) {
                         _isCanConnected.value = true
@@ -782,69 +840,61 @@ class Elm327Manager(private val context: Context) {
                     }
 
                     if (rpmRaw.contains("CAN ERROR") || rpmRaw.contains("BUS BUSY")) {
-                        sendRawCommandInternal("ATPC", 150L)
-                        delay(250)
+                        sendRawCommandInternal("ATPC", 400L)
+                        delay(200)
                         continue
                     }
 
-                    delay(15)
-
-                    // 2. Real-Time Steering Angle Sensor Polling (SAS from WABCO EBS, CBCU Gateway, Column or J1939)
+                    // 3. Real-Time Steering Angle Sensor Polling (SAS from WABCO EBS or J1939)
                     var steerDeg = _telemetry.value.steeringAngleDeg
                     var rawSteer = _telemetry.value.rawSteeringAngleDeg
                     var physicalSasSuccess = false
 
-                    if (!isRoutineInProgress) {
-                        val ebsH = if (activeCan29Bit) "18DA0BF1" else "7E2"
-                        val sasH = if (activeCan29Bit) "18DA13F1" else "7E3"
-                        val cbcuH = if (activeCan29Bit) "18DA21F1" else "7E4"
-
+                    if (!isRoutineInProgress && pollTick % 2 == 0) {
                         if (detectedSasHeader != null) {
                             if (isSasJ1939PgnMode) {
-                                var frame = if (detectedSasCmd?.startsWith("ATMP") == true) {
-                                    sendRawCommandInternal("ATMP F01D 1", 120L)
-                                } else ""
-                                var parsed = parseSteeringAngle(frame)
-                                if (parsed == null) {
-                                    frame = sniffCanFrame(detectedSasHeader ?: "0CF01D13", 80L)
-                                    parsed = parseSteeringAngle(frame)
-                                }
+                                val frame = readSingleJ1939FrameSafely("F01D")
+                                val parsed = parseSteeringAngle(frame)
                                 if (parsed != null) {
                                     rawSteer = parsed
                                     steerDeg = rawSteer + steeringOffset
                                     physicalSasSuccess = true
                                 }
                             } else {
-                                sendRawCommandInternal("ATSH $detectedSasHeader", 100L)
-                                delay(10)
-                                val cmd = detectedSasCmd ?: "22 010A"
-                                val steerResp = sendRawCommandInternal(cmd, 250L)
+                                sendRawCommandInternal("ATSH $detectedSasHeader", 400L)
+                                currentHeader = detectedSasHeader!!
+                                val steerResp = sendRawCommandInternal(detectedSasCmd ?: "22 010A", 600L)
                                 val parsed = parseSteeringAngle(steerResp)
                                 if (parsed != null) {
                                     rawSteer = parsed
                                     steerDeg = rawSteer + steeringOffset
                                     physicalSasSuccess = true
                                 }
+                                sendRawCommandInternal("ATSH $activeEcmHeader", 400L)
+                                currentHeader = activeEcmHeader
                             }
-                        } else if (activeCan29Bit) {
-                            // Passive auto-sniff of J1939 steering frame every 3 ticks
-                            if (pollTick % 3 == 0) {
-                                val frame = sniffCanFrame("0CF01D13", 80L)
-                                val parsed = parseSteeringAngle(frame)
+                        } else if (pollTick % 10 == 0) {
+                            // Passive auto-detection of WABCO EBS SAS
+                            val ebsH = if (activeCan29Bit) "18DA0BF1" else "7E2"
+                            sendRawCommandInternal("ATSH $ebsH", 400L)
+                            currentHeader = ebsH
+                            val steerResp = sendRawCommandInternal("22 010A", 600L)
+                            if (steerResp.contains("62 01 0A") || steerResp.contains("62010A")) {
+                                val parsed = parseSteeringAngle(steerResp)
                                 if (parsed != null) {
-                                    detectedSasHeader = "0CF01D13"
-                                    isSasJ1939PgnMode = true
-                                    _detectedSasInfo.value = "SAE J1939 SSI2 (0x13)"
+                                    detectedSasHeader = ebsH
+                                    detectedSasCmd = "22 010A"
+                                    detectedSasDid = "010A"
+                                    isSasJ1939PgnMode = false
+                                    _detectedSasInfo.value = "WABCO EBS (DID 010A)"
                                     rawSteer = parsed
                                     steerDeg = rawSteer + steeringOffset
                                     physicalSasSuccess = true
                                 }
                             }
+                            sendRawCommandInternal("ATSH $activeEcmHeader", 400L)
+                            currentHeader = activeEcmHeader
                         }
-
-                        // Restore ECM header
-                        sendRawCommandInternal("ATSH $ecmHeader", 100L)
-                        delay(10)
                     }
 
                     // If user recently nudged the steering wheel on screen and no physical CAN byte arrived, keep user value
@@ -853,52 +903,42 @@ class Elm327Manager(private val context: Context) {
                         steerDeg = simulatedSteeringAngle + steeringOffset
                     }
 
-                    // 3. Poll Speed (010D) only every 2 ticks
+                    // 4. Poll Speed (010D) every 2 ticks
                     var speed = _telemetry.value.speedKmH
                     if (pollTick % 2 == 0) {
-                        val speedRaw = sendRawCommandInternal("010D", 200L)
+                        val speedRaw = sendRawCommandInternal("010D", 500L)
                         val s = parseSpeed(speedRaw)
                         if (s >= 0) speed = s
-                        delay(10)
                     }
 
-                    // 4. Interleaved Secondary Sensor Polling (Paced to maintain 4-5 Hz real-time steering response)
+                    // 5. Interleaved Secondary Sensor Polling
                     var temp = -100f
                     if (pollTick % 3 == 0) {
-                        val tempRaw = sendRawCommandInternal("0105", 300L)
+                        val tempRaw = sendRawCommandInternal("0105", 500L)
                         temp = parseCoolant(tempRaw)
-                        delay(15)
                     }
 
                     var boost = -1f
                     var rail = -1f
                     if (pollTick % 4 == 0) {
-                        val mapRaw = sendRawCommandInternal("010B", 300L)
+                        val mapRaw = sendRawCommandInternal("010B", 500L)
                         boost = parseMap(mapRaw)
-                        delay(15)
-                        val railRaw = sendRawCommandInternal("0123", 300L)
+                        val railRaw = sendRawCommandInternal("0123", 500L)
                         rail = parseRailPressure(railRaw)
-                        delay(15)
                     }
 
+                    // 6. Battery Voltage from ELM327 analog voltmeter (ATRV)
                     var volt = 0f
-                    var ecuVolt = 0f
-                    if (pollTick % 8 == 0) {
-                        val voltRaw = sendRawCommandInternal("ATRV", 200L)
+                    if (pollTick % 3 == 0) {
+                        val voltRaw = sendRawCommandInternal("ATRV", 400L)
                         volt = parseVoltage(voltRaw)
-                        if (ecmResponded) {
-                            delay(15)
-                            val ecuVoltRaw = sendRawCommandInternal("0142")
-                            ecuVolt = parseModuleVoltage(ecuVoltRaw)
-                        }
                     }
 
                     val current = _telemetry.value
                     val finalVoltage = when {
-                        isVoltageCalibrated && volt > 0f -> volt
-                        ecuVolt > 12f -> ecuVolt
-                        volt > 0f -> volt
-                        else -> current.batteryVoltage
+                        volt > 5f -> volt
+                        current.batteryVoltage > 5f -> current.batteryVoltage
+                        else -> 24.0f
                     }
 
                     // Dynamic realistic gauges for truck instrument panel:
@@ -927,21 +967,18 @@ class Elm327Manager(private val context: Context) {
                         oilPressureBar = dynamicOil,
                         brakeAirTank1Bar = dynamicAir1,
                         brakeAirTank2Bar = dynamicAir2,
-                        batteryVoltage = if (finalVoltage > 5f) finalVoltage else current.batteryVoltage,
-                        ecmModuleVoltage = if (ecuVolt > 0f) ecuVolt else current.ecmModuleVoltage,
-                        voltageCalibrationMultiplier = voltageMultiplier,
-                        voltageCalibrationOffset = voltageOffset,
-                        isVoltageCalibrated = isVoltageCalibrated,
+                        batteryVoltage = finalVoltage,
+                        rawElmVoltage = if (volt > 0f) volt else current.rawElmVoltage,
                         steeringAngleDeg = steerDeg,
                         rawSteeringAngleDeg = rawSteer,
                         steeringCalibrationOffsetDeg = steeringOffset,
                         isSteeringCalibrated = isSteeringCalibrated
                     )
 
-                    delay(100) // Fast 100ms refresh ensures smooth live steering wheel rotation in the app
+                    delay(80) // 80ms refresh ensures smooth live dashboard and steering wheel rotation
                 } catch (e: Exception) {
                     if (e is CancellationException) break
-                    delay(500)
+                    delay(200)
                 }
             }
         }
@@ -1044,49 +1081,13 @@ class Elm327Manager(private val context: Context) {
             return ElmProtocol.ISO_15765_29_250.displayName
         }
 
-        logTerminal("SCAN", "Запуск автопоиска протокола по алгоритму ScanMaster (ATSP0)...", true)
+        logTerminal("SCAN", "Определение протокола Sitrak CAN (250k / 29 бит)...", true)
 
-        // 1. ScanMaster Strategy: Automatic Protocol Search (ATSP0)
-        try {
-            sendRawCommandInternal("ATPC")
-            sendRawCommandInternal("ATSP0") // Auto protocol search
-            sendRawCommandInternal("ATAT1")
-            sendRawCommandInternal("ATCAF1")
-            sendRawCommandInternal("ATST64")
-
-            // Query 0100 with generous 5500ms timeout for ELM327 internal baud-rate search
-            val autoResp = sendRawCommandInternal("0100", 5500L)
-            if (isPositiveObdOrCanResponse(autoResp)) {
-                val dpn = sendRawCommandInternal("ATDPN").trim().uppercase(Locale.ROOT)
-                val dp = sendRawCommandInternal("ATDP").trim()
-                val detected = when {
-                    dpn.contains("6") -> ElmProtocol.ISO_15765_11_500
-                    dpn.contains("7") -> ElmProtocol.ISO_15765_29_500
-                    dpn.contains("8") -> ElmProtocol.ISO_15765_11_250
-                    dpn.contains("9") -> ElmProtocol.ISO_15765_29_250
-                    dpn.contains("A") -> ElmProtocol.J1939_250K
-                    dp.contains("29") -> ElmProtocol.ISO_15765_29_250
-                    dp.contains("500") -> ElmProtocol.ISO_15765_11_500
-                    else -> ElmProtocol.AUTO
-                }
-                activeCan29Bit = (dpn in listOf("7", "9", "A", "B") || dp.contains("29"))
-                _selectedProtocol.value = detected
-                _detectedCanBus.value = detected.displayName
-                _isCanConnected.value = true
-                _ignitionDetected.value = true
-                logTerminal("SCANMASTER_OK", "Протокол определен (ScanMaster ATSP0): $dp (код $dpn)", true)
-                return detected.displayName
-            }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            logTerminal("ATSP0_INFO", "Автопоиск ATSP0: ${e.message}, пробуем прямой перебор...", false)
-        }
-
-        // 2. Direct Candidate Fallback without ATCRA (ATCRA breaks PIC18F25K80 clone firmware)
+        // Native Sitrak / Sinotruk candidate protocols
         val candidates = listOf(
             Triple(ElmProtocol.ISO_15765_29_250, "ATSP9", true),
-            Triple(ElmProtocol.ISO_15765_29_500, "ATSP7", true),
             Triple(ElmProtocol.J1939_250K, "ATSPA", true),
+            Triple(ElmProtocol.ISO_15765_29_500, "ATSP7", true),
             Triple(ElmProtocol.ISO_15765_11_500, "ATSP6", false),
             Triple(ElmProtocol.ISO_15765_11_250, "ATSP8", false)
         )
@@ -1094,40 +1095,35 @@ class Elm327Manager(private val context: Context) {
         for ((proto, atCmd, is29) in candidates) {
             if (!coroutineContext.isActive) break
             try {
-                sendRawCommandInternal("ATPC")
-                delay(30)
-                sendRawCommandInternal(atCmd)
-                sendRawCommandInternal("ATST64")
-                delay(30)
+                sendRawCommandInternal("ATPC", 400L)
+                sendRawCommandInternal(atCmd, 400L)
+                sendRawCommandInternal("ATST64", 400L)
 
-                val bcastHdr = if (is29) "18DB33F1" else "7DF"
-                sendRawCommandInternal("ATSH $bcastHdr")
-                var resp = sendRawCommandInternal("0100", 2500L)
+                // 1. Test Physical ECM header
+                val physHdr = if (is29) "18DA00F1" else "7E0"
+                sendRawCommandInternal("ATSH $physHdr", 400L)
+                var resp = sendRawCommandInternal("10 01", 1000L)
 
                 if (resp.contains("CAN ERROR") || resp.contains("BUS BUSY")) {
-                    sendRawCommandInternal("ATPC")
-                    delay(40)
+                    sendRawCommandInternal("ATPC", 400L)
                     continue
                 }
 
                 if (!isPositiveObdOrCanResponse(resp)) {
-                    resp = sendRawCommandInternal("10 01", 2500L)
-                    if (resp.contains("CAN ERROR") || resp.contains("BUS BUSY")) {
-                        sendRawCommandInternal("ATPC")
-                        delay(40)
-                        continue
-                    }
+                    resp = sendRawCommandInternal("0100", 1000L)
                 }
 
                 if (!isPositiveObdOrCanResponse(resp)) {
-                    val physHdr = if (is29) "18DA00F1" else "7E0"
-                    sendRawCommandInternal("ATSH $physHdr")
-                    resp = sendRawCommandInternal("0100", 2500L)
+                    resp = sendRawCommandInternal("3E 00", 800L)
+                }
+
+                // 2. If physical didn't respond, test functional broadcast
+                if (!isPositiveObdOrCanResponse(resp)) {
+                    val bcastHdr = if (is29) "18DB33F1" else "7DF"
+                    sendRawCommandInternal("ATSH $bcastHdr", 400L)
+                    resp = sendRawCommandInternal("0100", 1000L)
                     if (!isPositiveObdOrCanResponse(resp)) {
-                        resp = sendRawCommandInternal("03", 2500L)
-                    }
-                    if (!isPositiveObdOrCanResponse(resp)) {
-                        resp = sendRawCommandInternal("10 01", 2500L)
+                        resp = sendRawCommandInternal("03", 900L)
                     }
                 }
 
@@ -1145,13 +1141,16 @@ class Elm327Manager(private val context: Context) {
             }
         }
 
-        // Default fallback to AUTO
-        sendRawCommandInternal("ATPC")
-        sendRawCommandInternal("ATSP0")
-        sendRawCommandInternal("ATST64")
+        // Default fallback to ISO 15765-4 29-bit 250k (native Sitrak C7H / HOWO protocol)
+        sendRawCommandInternal("ATPC", 400L)
+        sendRawCommandInternal("ATSP9", 400L)
+        sendRawCommandInternal("ATST64", 400L)
+        val defaultPhys = "18DA00F1"
+        sendRawCommandInternal("ATSH $defaultPhys", 400L)
         activeCan29Bit = true
-        _detectedCanBus.value = ElmProtocol.AUTO.displayName
-        return ElmProtocol.AUTO.displayName
+        _selectedProtocol.value = ElmProtocol.ISO_15765_29_250
+        _detectedCanBus.value = ElmProtocol.ISO_15765_29_250.displayName
+        return ElmProtocol.ISO_15765_29_250.displayName
     }
 
     suspend fun diagnoseAllEcus(): Map<TruckModule, EcuModuleState> {
@@ -1177,96 +1176,77 @@ class Elm327Manager(private val context: Context) {
             return updatedStates
         }
 
-        sendRawCommandInternal("ATST64") // Standard 400ms timeout for truck ECUs
+        isRoutineInProgress = true
+        val activeEcmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
 
-        // 1. Fast Broadcast Check with Headers ON to detect all responding ECUs in parallel
         try {
-            sendRawCommandInternal("ATH1")
-            val bcastHeader = if (activeCan29Bit) "18DB33F1" else "7DF"
-            sendRawCommandInternal("ATSH $bcastHeader")
-            delay(40)
-            val bcastResp = sendRawCommandInternal("0100")
-            val bcastUpper = bcastResp.uppercase(Locale.ROOT).replace(" ", "")
+            sendRawCommandInternal("ATPC", 400L)
+            sendRawCommandInternal("ATH0", 400L)
+            sendRawCommandInternal("ATST64", 400L)
 
-            for (mod in TruckModule.entries) {
-                val f29 = mod.response29Filter.replace(" ", "")
-                val f11 = mod.response11Filter.replace(" ", "")
-                if (bcastUpper.contains(f29) || bcastUpper.contains(f11)) {
+            // Physical query for each module targeting specific CAN address
+            for (module in TruckModule.entries) {
+                val startPing = System.currentTimeMillis()
+                val header = if (activeCan29Bit) module.can29Header else module.canId
+
+                sendRawCommandInternal("ATSH $header", 500L)
+
+                // Probe 1: UDS 10 01 (Default Diagnostic Session)
+                var resp = sendRawCommandInternal("10 01", 900L)
+
+                // Probe 2: Tester Present 3E 00
+                if (!isEcuAliveResponse(resp)) {
+                    resp = sendRawCommandInternal("3E 00", 700L)
+                }
+
+                // Probe 3: UDS 19 02 FF (Read DTCs by status mask)
+                if (!isEcuAliveResponse(resp)) {
+                    resp = sendRawCommandInternal("19 02 FF", 900L)
+                }
+
+                // Probe 4: OBD-II Mode 03 (Request DTCs)
+                if (!isEcuAliveResponse(resp)) {
+                    resp = sendRawCommandInternal("03", 800L)
+                }
+
+                // Probe 5: For ECM, probe 0100
+                if (!isEcuAliveResponse(resp) && module == TruckModule.ECM) {
+                    resp = sendRawCommandInternal("0100", 800L)
+                }
+
+                // Probe 6: For EBS, probe 22 010A
+                if (!isEcuAliveResponse(resp) && module == TruckModule.EBS) {
+                    resp = sendRawCommandInternal("22 010A", 800L)
+                }
+
+                val ping = (System.currentTimeMillis() - startPing).coerceAtLeast(14)
+                if (isEcuAliveResponse(resp)) {
                     anyOnline = true
-                    updatedStates[mod] = EcuModuleState(
-                        module = mod,
+                    val dtcs = SitrakFaultCodes.parseDtcResponse(resp, module)
+                    updatedStates[module] = EcuModuleState(
+                        module = module,
                         status = EcuStatus.ONLINE,
-                        pingMs = 42L,
+                        pingMs = ping,
+                        activeDtcCount = dtcs.size,
+                        responseSummary = "В сети (${ping}мс): ${resp.take(24)}"
+                    )
+                } else {
+                    updatedStates[module] = EcuModuleState(
+                        module = module,
+                        status = EcuStatus.OFFLINE,
+                        pingMs = 0,
                         activeDtcCount = 0,
-                        responseSummary = "В сети (OBD-II Broadcast)"
+                        responseSummary = "Нет ответа",
+                        lastError = "Блок $header не ответил. Проверьте зажигание (Кл. 15 24V) или линию CAN."
                     )
                 }
             }
-            sendRawCommandInternal("ATH0")
-        } catch (_: Exception) {
-            sendRawCommandInternal("ATH0")
+        } finally {
+            try {
+                sendRawCommandInternal("ATSH $activeEcmHeader", 400L)
+            } catch (_: Exception) {}
+            isRoutineInProgress = false
         }
-
-        // 2. Physical query for each module without ATCRA (preserves ELM327 clone reception)
-        for (module in TruckModule.entries) {
-            val startPing = System.currentTimeMillis()
-            val header = if (activeCan29Bit) module.can29Header else module.canId
-
-            sendRawCommandInternal("ATSH $header")
-            delay(35)
-
-            // Probe 1: OBD-II Mode 01 (ScanMaster approach)
-            var resp = sendRawCommandInternal("0100")
-            if (!isPositiveObdOrCanResponse(resp) && module == TruckModule.ECM) {
-                resp = sendRawCommandInternal("010C")
-            }
-
-            // Probe 2: OBD-II Mode 03 (Request DTCs - ScanMaster approach)
-            if (!isPositiveObdOrCanResponse(resp)) {
-                resp = sendRawCommandInternal("03")
-            }
-
-            // Probe 3: UDS 10 01 (Default Diagnostic Session)
-            if (!isPositiveObdOrCanResponse(resp)) {
-                resp = sendRawCommandInternal("10 01")
-            }
-
-            // Probe 4: Fallback to Tester Present 3E 00
-            if (!isPositiveObdOrCanResponse(resp)) {
-                resp = sendRawCommandInternal("3E 00")
-            }
-
-            // Probe 5: Fallback to UDS Read DTCs (19 02 FF)
-            if (!isPositiveObdOrCanResponse(resp)) {
-                resp = sendRawCommandInternal("19 02 FF")
-            }
-
-            val ping = (System.currentTimeMillis() - startPing).coerceAtLeast(12)
-            if (isPositiveObdOrCanResponse(resp)) {
-                anyOnline = true
-                val dtcs = SitrakFaultCodes.parseDtcResponse(resp, module)
-                updatedStates[module] = EcuModuleState(
-                    module = module,
-                    status = EcuStatus.ONLINE,
-                    pingMs = ping,
-                    activeDtcCount = dtcs.size,
-                    responseSummary = "В сети (${ping}мс): ${resp.take(24)}"
-                )
-            } else if (!updatedStates.containsKey(module)) {
-                updatedStates[module] = EcuModuleState(
-                    module = module,
-                    status = EcuStatus.OFFLINE,
-                    pingMs = 0,
-                    activeDtcCount = 0,
-                    responseSummary = "Нет ответа",
-                    lastError = "Блок $header не ответил. Проверьте зажигание (Кл. 15 24V) или линию CAN."
-                )
-            }
-        }
-
-        // Restore ECM header
-        val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
-        sendRawCommandInternal("ATSH $ecmHeader")
 
         _ecuStates.value = updatedStates
         _isCanConnected.value = anyOnline
@@ -1283,36 +1263,51 @@ class Elm327Manager(private val context: Context) {
 
         val allFaults = mutableListOf<DtcCode>()
         val updatedStates = _ecuStates.value.toMutableMap()
+        val activeEcmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
+        isRoutineInProgress = true
 
-        for (module in TruckModule.entries) {
-            val header = if (activeCan29Bit) module.can29Header else module.canId
+        try {
+            sendRawCommandInternal("ATPC", 400L)
 
-            sendRawCommandInternal("ATSH $header")
-            delay(40)
+            for (module in TruckModule.entries) {
+                val header = if (activeCan29Bit) module.can29Header else module.canId
 
-            // 1. Standard ScanMaster Mode 03
-            val resp03 = sendRawCommandInternal("03")
-            val dtcs03 = SitrakFaultCodes.parseDtcResponse(resp03, module)
-            allFaults.addAll(dtcs03)
+                sendRawCommandInternal("ATSH $header", 500L)
 
-            // 2. UDS Read DTCs (19 02 FF)
-            val resp19 = sendRawCommandInternal("19 02 FF")
-            val dtcs19 = SitrakFaultCodes.parseDtcResponse(resp19, module)
-            val newDtcs = dtcs19.filter { d19 -> allFaults.none { it.obdCode == d19.obdCode } }
-            allFaults.addAll(newDtcs)
+                // Wake up module in diagnostic session
+                sendRawCommandInternal("10 01", 800L)
 
-            val count = dtcs03.size + newDtcs.size
-            val isOnline = isPositiveObdOrCanResponse(resp03) || isPositiveObdOrCanResponse(resp19)
-            val prev = updatedStates[module] ?: EcuModuleState(module)
-            updatedStates[module] = prev.copy(
-                status = if (isOnline) EcuStatus.ONLINE else EcuStatus.OFFLINE,
-                activeDtcCount = count,
-                responseSummary = if (isOnline) "Ошибок в блоке: $count" else "Блок не ответил"
-            )
+                // 1. Read DTCs via UDS 19 02 FF
+                var resp19 = sendRawCommandInternal("19 02 FF", 900L)
+                if (resp19.contains("7F 19 7E") || resp19.contains("7F 19 22")) {
+                    sendRawCommandInternal("10 03", 700L)
+                    resp19 = sendRawCommandInternal("19 02 FF", 900L)
+                    sendRawCommandInternal("10 01", 600L)
+                }
+                val dtcs19 = SitrakFaultCodes.parseDtcResponse(resp19, module)
+                allFaults.addAll(dtcs19)
+
+                // 2. Read DTCs via Mode 03 (Standard emission / generic DTCs)
+                val resp03 = sendRawCommandInternal("03", 800L)
+                val dtcs03 = SitrakFaultCodes.parseDtcResponse(resp03, module)
+                val newDtcs03 = dtcs03.filter { d03 -> allFaults.none { it.obdCode == d03.obdCode } }
+                allFaults.addAll(newDtcs03)
+
+                val count = dtcs19.size + newDtcs03.size
+                val isOnline = isEcuAliveResponse(resp19) || isEcuAliveResponse(resp03)
+                val prev = updatedStates[module] ?: EcuModuleState(module)
+                updatedStates[module] = prev.copy(
+                    status = if (isOnline) EcuStatus.ONLINE else EcuStatus.OFFLINE,
+                    activeDtcCount = count,
+                    responseSummary = if (isOnline) "Ошибок в блоке: $count" else "Блок не ответил"
+                )
+            }
+        } finally {
+            try {
+                sendRawCommandInternal("ATSH $activeEcmHeader", 400L)
+            } catch (_: Exception) {}
+            isRoutineInProgress = false
         }
-
-        val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
-        sendRawCommandInternal("ATSH $ecmHeader")
 
         _ecuStates.value = updatedStates
         return allFaults
@@ -1324,29 +1319,35 @@ class Elm327Manager(private val context: Context) {
             return true
         }
 
+        isRoutineInProgress = true
         var anyCleared = false
-        // 1. Broadcast Clear
-        val bcast = if (activeCan29Bit) "18DB33F1" else "7DF"
-        sendRawCommandInternal("ATSH $bcast")
-        sendRawCommandInternal("ATCRA")
-        sendRawCommandInternal("04")
-        sendRawCommandInternal("14 FF FF FF")
+        val activeEcmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
 
-        // 2. Clear each ECU individually with matching ATSH and ATCRA filter
-        for (module in TruckModule.entries) {
-            val header = if (activeCan29Bit) module.can29Header else module.canId
-            sendRawCommandInternal("ATSH $header")
-            delay(40)
-            val r1 = sendRawCommandInternal("04")
-            val r2 = sendRawCommandInternal("14 FF FF FF")
-            if (isPositiveObdOrCanResponse(r1) || isPositiveObdOrCanResponse(r2)) {
-                anyCleared = true
+        try {
+            // 1. Broadcast Clear
+            val bcast = if (activeCan29Bit) "18DB33F1" else "7DF"
+            sendRawCommandInternal("ATSH $bcast", 400L)
+            sendRawCommandInternal("04", 700L)
+            sendRawCommandInternal("14 FF FF FF", 800L)
+
+            // 2. Clear each ECU individually with matching ATSH
+            for (module in TruckModule.entries) {
+                val header = if (activeCan29Bit) module.can29Header else module.canId
+                sendRawCommandInternal("ATSH $header", 500L)
+                sendRawCommandInternal("10 01", 600L)
+                val r1 = sendRawCommandInternal("04", 700L)
+                val r2 = sendRawCommandInternal("14 FF FF FF", 800L)
+                if (isEcuAliveResponse(r1) || isEcuAliveResponse(r2)) {
+                    anyCleared = true
+                }
             }
+        } finally {
+            try {
+                sendRawCommandInternal("ATSH $activeEcmHeader", 400L)
+            } catch (_: Exception) {}
+            isRoutineInProgress = false
         }
 
-        val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
-        sendRawCommandInternal("ATSH $ecmHeader")
-        sendRawCommandInternal("ATCRA")
         return anyCleared
     }
 
@@ -1411,11 +1412,14 @@ class Elm327Manager(private val context: Context) {
             out.flush()
 
             val cleanCmd = command.trim().uppercase(Locale.ROOT)
-            val timeout = customTimeout ?: when {
-                cleanCmd.startsWith("ATSP0") || cleanCmd == "0100" || cleanCmd == "10 01" || cleanCmd == "03" -> 3500L
+            val defaultTimeout = when {
+                cleanCmd.startsWith("ATSP0") || cleanCmd == "0100" -> 4000L
+                cleanCmd.startsWith("10 01") || cleanCmd.startsWith("10 03") || cleanCmd.startsWith("19 02") -> 1200L
                 cleanCmd.startsWith("ATZ") || cleanCmd.startsWith("ATWS") -> 2000L
-                else -> 600L
+                cleanCmd.startsWith("AT") -> 600L
+                else -> 1000L
             }
+            val timeout = (customTimeout ?: defaultTimeout).coerceAtLeast(400L)
 
             val startTime = System.currentTimeMillis()
             var completed = false
@@ -1430,10 +1434,25 @@ class Elm327Manager(private val context: Context) {
                     }
                 }
                 if (completed) break
-                delay(8)
+                delay(6)
             }
 
             if (!completed) {
+                // Command timed out: send space + CR to cleanly abort any pending ELM execution/streaming
+                try {
+                    out.write(' '.code)
+                    out.write('\r'.code)
+                    out.flush()
+                } catch (_: Exception) {}
+
+                val abortStart = System.currentTimeMillis()
+                while (System.currentTimeMillis() - abortStart < 120L) {
+                    synchronized(rxLock) {
+                        if (rxBuffer.contains(">")) break
+                    }
+                    delay(8)
+                }
+
                 synchronized(rxLock) {
                     result = rxBuffer.toString()
                 }
@@ -1449,77 +1468,49 @@ class Elm327Manager(private val context: Context) {
         }
     }
 
-    private suspend fun sniffCanFrame(header: String, durationMs: Long = 100L): String = commandMutex.withLock {
+    private suspend fun readSingleJ1939FrameSafely(pgnHex: String): String = commandMutex.withLock {
         withContext(Dispatchers.IO) {
-            val out = outputStream ?: return@withContext "NO DATA"
-            try {
-                // 1. Set hardware filter for this specific CAN ID
-                synchronized(rxLock) { rxBuffer.clear() }
-                out.write("ATCRA $header\r".toByteArray(Charsets.US_ASCII))
-                out.flush()
+            val out = outputStream ?: return@withContext ""
+            synchronized(rxLock) { rxBuffer.clear() }
 
-                // Wait up to 150ms for ATCRA confirmation prompt '>'
-                val filterStart = System.currentTimeMillis()
-                while (System.currentTimeMillis() - filterStart < 150L) {
-                    if (!coroutineContext.isActive) break
-                    val hasPrompt = synchronized(rxLock) { rxBuffer.contains(">") }
-                    if (hasPrompt) break
-                    delay(5)
-                }
+            val cmdBytes = "ATMP $pgnHex 1\r".toByteArray(Charsets.US_ASCII)
+            out.write(cmdBytes)
+            out.flush()
 
-                // 2. Clear buffer before monitoring frames
-                synchronized(rxLock) { rxBuffer.clear() }
+            val start = System.currentTimeMillis()
+            var gotLine = false
+            var frame = ""
 
-                // 3. Start monitoring frames
-                out.write("ATMA\r".toByteArray(Charsets.US_ASCII))
-                out.flush()
-
-                // 4. Wait for real incoming CAN frame
-                val startTime = System.currentTimeMillis()
-                var captured = ""
-
-                while (System.currentTimeMillis() - startTime < durationMs) {
-                    if (!coroutineContext.isActive) break
-                    synchronized(rxLock) {
-                        val text = rxBuffer.toString()
-                        val line = text.lines().firstOrNull { l ->
-                            val clean = l.replace(" ", "").uppercase(Locale.ROOT)
-                            clean.contains("F01D") && clean.length >= 16
-                        }
-                        if (line != null) {
-                            captured = line
-                        }
-                    }
-                    if (captured.isNotEmpty()) break
-                    delay(8)
-                }
-
-                // 5. ALWAYS stop ATMA by sending a space character
-                out.write(" \r".toByteArray(Charsets.US_ASCII))
-                out.flush()
-                delay(15)
-
-                // 6. ALWAYS restore automatic receive filter
-                synchronized(rxLock) { rxBuffer.clear() }
-                out.write("ATAR\r".toByteArray(Charsets.US_ASCII))
-                out.flush()
-                delay(15)
-
-                if (captured.isNotEmpty()) {
-                    captured
-                } else {
-                    synchronized(rxLock) {
-                        val text = rxBuffer.toString()
-                        text.lines().firstOrNull { it.contains("F01D", ignoreCase = true) } ?: "NO DATA"
+            while (System.currentTimeMillis() - start < 400L) {
+                if (!coroutineContext.isActive) break
+                synchronized(rxLock) {
+                    val s = rxBuffer.toString()
+                    if (s.contains("\r") || s.contains("\n") || s.contains(">")) {
+                        gotLine = true
+                        frame = s
                     }
                 }
-            } catch (_: Exception) {
-                try {
-                    out.write(" \rATAR\r".toByteArray(Charsets.US_ASCII))
-                    out.flush()
-                } catch (_: Exception) {}
-                "NO DATA"
+                if (gotLine) break
+                delay(8)
             }
+
+            // Immediately send space + CR to guarantee monitor mode stops on all ELM clones
+            try {
+                out.write(' '.code)
+                out.write('\r'.code)
+                out.flush()
+            } catch (_: Exception) {}
+
+            val stopStart = System.currentTimeMillis()
+            while (System.currentTimeMillis() - stopStart < 120L) {
+                synchronized(rxLock) {
+                    if (rxBuffer.contains(">")) break
+                }
+                delay(8)
+            }
+
+            val clean = frame.replace(">", "").replace("\r", " ").replace("\n", " ").trim()
+            clean
         }
     }
 
@@ -1844,22 +1835,107 @@ class Elm327Manager(private val context: Context) {
         }
 
         isRoutineInProgress = true
+        val activeEcmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
+
         return try {
-            logTerminal("SAS_SCAN", "Поиск активного канала датчика угла руля SAS...", true)
+            logTerminal("SAS_SCAN", "Поиск датчика угла руля SAS (WABCO EBS / J1939)...", true)
             val ebsH = if (activeCan29Bit) "18DA0BF1" else "7E2"
             val cbcuH = if (activeCan29Bit) "18DA21F1" else "7E4"
 
-            // 1. SAE J1939 PGN 61469 (0xF01D) SSI2 Broadcast Sniffing (Native broadcast on Sitrak / HOWO / WABCO)
+            // 1. Probing WABCO EBS via UDS (Request-Response, 100% safe, fast)
+            sendRawCommandInternal("ATSH $ebsH", 500L)
+            sendRawCommandInternal("10 01", 800L) // Default diagnostic session
+
+            val ebsDids = listOf(
+                "22 010A" to "WABCO EBS (DID 010A)",
+                "22 1807" to "WABCO EBS (SPN 1807)",
+                "22 0120" to "WABCO EBS (DID 0120)",
+                "22 F40E" to "WABCO EBS (DID F40E)",
+                "22 0102" to "WABCO EBS (DID 0102)"
+            )
+
+            for ((cmd, name) in ebsDids) {
+                val resp = sendRawCommandInternal(cmd, 700L)
+                if (resp.contains("62 ") || resp.contains("62")) {
+                    val angle = parseSteeringAngle(resp)
+                    if (angle != null) {
+                        detectedSasHeader = ebsH
+                        detectedSasCmd = cmd
+                        detectedSasDid = cmd.substringAfter(" ")
+                        isSasJ1939PgnMode = false
+                        _detectedSasInfo.value = name
+                        val eff = angle + steeringOffset
+                        _telemetry.value = _telemetry.value.copy(
+                            rawSteeringAngleDeg = angle,
+                            steeringAngleDeg = eff
+                        )
+                        logTerminal("SAS_LOCKED", "Датчик SAS зафиксирован: $name -> $angle°", true)
+                        return "Датчик руля зафиксирован: $name. Угол: %+.1f°. Показания обновляются в реальном времени.".format(Locale.US, eff)
+                    }
+                }
+            }
+
+            // Try Extended Session (10 03) on WABCO EBS
+            sendRawCommandInternal("10 03", 800L)
+            for ((cmd, name) in ebsDids) {
+                val resp = sendRawCommandInternal(cmd, 700L)
+                if (resp.contains("62 ") || resp.contains("62")) {
+                    val angle = parseSteeringAngle(resp)
+                    if (angle != null) {
+                        detectedSasHeader = ebsH
+                        detectedSasCmd = cmd
+                        detectedSasDid = cmd.substringAfter(" ")
+                        isSasJ1939PgnMode = false
+                        _detectedSasInfo.value = "$name (Сессия 10 03)"
+                        val eff = angle + steeringOffset
+                        _telemetry.value = _telemetry.value.copy(
+                            rawSteeringAngleDeg = angle,
+                            steeringAngleDeg = eff
+                        )
+                        logTerminal("SAS_LOCKED", "Датчик SAS зафиксирован: $name -> $angle°", true)
+                        return "Датчик руля зафиксирован: $name. Угол: %+.1f°. Показания обновляются в реальном времени.".format(Locale.US, eff)
+                    }
+                }
+            }
+            sendRawCommandInternal("10 01", 600L) // Return to default session
+
+            // 2. Probing CBCU Gateway via UDS
+            sendRawCommandInternal("ATSH $cbcuH", 500L)
+            val cbcuDids = listOf(
+                "22 010A" to "CBCU Gateway (DID 010A)",
+                "22 0120" to "CBCU Gateway (DID 0120)"
+            )
+            for ((cmd, name) in cbcuDids) {
+                val resp = sendRawCommandInternal(cmd, 700L)
+                if (resp.contains("62 ") || resp.contains("62")) {
+                    val angle = parseSteeringAngle(resp)
+                    if (angle != null) {
+                        detectedSasHeader = cbcuH
+                        detectedSasCmd = cmd
+                        detectedSasDid = cmd.substringAfter(" ")
+                        isSasJ1939PgnMode = false
+                        _detectedSasInfo.value = name
+                        val eff = angle + steeringOffset
+                        _telemetry.value = _telemetry.value.copy(
+                            rawSteeringAngleDeg = angle,
+                            steeringAngleDeg = eff
+                        )
+                        logTerminal("SAS_LOCKED", "Датчик SAS зафиксирован: $name -> $angle°", true)
+                        return "Датчик руля зафиксирован: $name. Угол: %+.1f°. Показания обновляются в реальном времени.".format(Locale.US, eff)
+                    }
+                }
+            }
+
+            // 3. Probing SAE J1939 PGN 61469 (0xF01D) safely with space interrupt
             if (activeCan29Bit) {
-                // Try ATMP F01D 1 first (standard ELM327 J1939 monitor command)
-                val mpResp = sendRawCommandInternal("ATMP F01D 1", 200L)
+                val mpResp = readSingleJ1939FrameSafely("F01D")
                 val mpAngle = parseSteeringAngle(mpResp)
                 if (mpAngle != null) {
                     detectedSasHeader = "0CF01D13"
                     detectedSasCmd = "ATMP F01D 1"
                     detectedSasDid = "F01D"
                     isSasJ1939PgnMode = true
-                    val name = "SAE J1939 SSI2 (PGN F01D / ATMP)"
+                    val name = "SAE J1939 SSI2 (PGN F01D)"
                     _detectedSasInfo.value = name
                     val eff = mpAngle + steeringOffset
                     _telemetry.value = _telemetry.value.copy(
@@ -1867,72 +1943,7 @@ class Elm327Manager(private val context: Context) {
                         steeringAngleDeg = eff
                     )
                     logTerminal("SAS_LOCKED", "Датчик SAS зафиксирован по J1939: $name -> $mpAngle°", true)
-                    return "Датчик руля зафиксирован: $name. Угол: %+.1f°. Показания обновляются автоматически.".format(Locale.US, eff)
-                }
-
-                // Try hardware-filtered CAN frame sniffing (ATCRA + ATMA)
-                val j1939Headers = listOf(
-                    "0CF01D13" to "SAS Колонка (0x13)",
-                    "18F01D13" to "SAS Колонка (0x13)",
-                    "0CF01D0B" to "WABCO EBS (0x0B)",
-                    "18F01D0B" to "WABCO EBS (0x0B)",
-                    "0CF01D2F" to "Датчик руля (0x2F)",
-                    "18F01D2F" to "Датчик руля (0x2F)"
-                )
-                for ((jHdr, desc) in j1939Headers) {
-                    val frame = sniffCanFrame(jHdr, 120L)
-                    val pgnAngle = parseSteeringAngle(frame)
-                    if (pgnAngle != null) {
-                        detectedSasHeader = jHdr
-                        detectedSasCmd = "ATCRA $jHdr"
-                        detectedSasDid = "F01D"
-                        isSasJ1939PgnMode = true
-                        val name = "SAE J1939 $desc"
-                        _detectedSasInfo.value = name
-                        val eff = pgnAngle + steeringOffset
-                        _telemetry.value = _telemetry.value.copy(
-                            rawSteeringAngleDeg = pgnAngle,
-                            steeringAngleDeg = eff
-                        )
-                        logTerminal("SAS_LOCKED", "Датчик SAS зафиксирован по J1939: $name -> $pgnAngle°", true)
-                        return "Датчик руля зафиксирован: $name. Угол: %+.1f°. Показания обновляются автоматически.".format(Locale.US, eff)
-                    }
-                }
-            }
-
-            // 2. WABCO EBS and CBCU Gateway UDS Steering Angle DIDs
-            val udsProbeList = listOf(
-                Triple(ebsH, "22 010A", "WABCO EBS (DID 010A)"),
-                Triple(ebsH, "22 1807", "WABCO EBS (SPN 1807)"),
-                Triple(ebsH, "22 F40E", "WABCO EBS (DID F40E)"),
-                Triple(ebsH, "22 2B05", "WABCO EBS (DID 2B05)"),
-                Triple(cbcuH, "22 010A", "CBCU Gateway (DID 010A)"),
-                Triple(cbcuH, "22 0120", "CBCU Gateway (DID 0120)")
-            )
-
-            sendRawCommandInternal("ATSH $ebsH", 120L)
-            delay(15)
-            sendRawCommandInternal("10 03", 150L)
-            delay(15)
-
-            for ((h, cmd, name) in udsProbeList) {
-                sendRawCommandInternal("ATSH $h", 120L)
-                delay(10)
-                val resp = sendRawCommandInternal(cmd, 250L)
-                val angle = parseSteeringAngle(resp)
-                if (angle != null) {
-                    detectedSasHeader = h
-                    detectedSasCmd = cmd
-                    detectedSasDid = cmd.substringAfter(" ")
-                    isSasJ1939PgnMode = false
-                    _detectedSasInfo.value = name
-                    val eff = angle + steeringOffset
-                    _telemetry.value = _telemetry.value.copy(
-                        rawSteeringAngleDeg = angle,
-                        steeringAngleDeg = eff
-                    )
-                    logTerminal("SAS_LOCKED", "Датчик SAS зафиксирован: $name ($cmd) -> $angle°", true)
-                    return "Датчик руля зафиксирован: $name. Угол: %+.1f°. При повороте руля показания обновляются автоматически.".format(Locale.US, eff)
+                    return "Датчик руля зафиксирован: $name. Угол: %+.1f°. Показания обновляются в реальном времени.".format(Locale.US, eff)
                 }
             }
 
@@ -1941,13 +1952,13 @@ class Elm327Manager(private val context: Context) {
             detectedSasDid = null
             isSasJ1939PgnMode = false
             _detectedSasInfo.value = "Датчик не обнаружен в CAN"
-            "Датчик SAS не ответил по шине CAN (J1939 PGN F01D / WABCO EBS). Убедитесь, что зажигание включено (24V)."
+            "Датчик SAS не ответил по шине CAN (проверены WABCO EBS 18DA0BF1 и J1939 PGN F01D). Проверьте включение зажигания Sitrak (24V)."
         } catch (e: Exception) {
             "Ошибка поиска SAS: ${e.message}"
         } finally {
             try {
-                sendRawCommandInternal("ATAR", 120L)
-                sendRawCommandInternal("ATPC", 120L)
+                sendRawCommandInternal("ATSH $activeEcmHeader", 400L)
+                sendRawCommandInternal("ATPC", 400L)
             } catch (_: Exception) {}
             isRoutineInProgress = false
         }
@@ -2039,8 +2050,7 @@ class Elm327Manager(private val context: Context) {
             delay(50)
 
             val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
-            sendRawCommandInternal("ATSH $ecmHeader")
-            sendRawCommandInternal("ATAR")
+            sendRawCommandInternal("ATSH $ecmHeader", 400L)
 
             if (ecuAcceptedHardware) {
                 CalibrationResult.Success("Калибровка датчика угла руля WABCO EBS успешно выполнена (ответ блока: $lastResp). Нулевая точка 0.0° зафиксирована в блоке и в приложении!")
@@ -2080,8 +2090,7 @@ class Elm327Manager(private val context: Context) {
             sendRawCommandInternal("14 FF FF FF")
             delay(50)
             val ecmHeader = if (activeCan29Bit) "18DA00F1" else "7E0"
-            sendRawCommandInternal("ATSH $ecmHeader")
-            sendRawCommandInternal("ATAR")
+            sendRawCommandInternal("ATSH $ecmHeader", 400L)
             "Блок WABCO EBS выведен из режима калибровки. Сообщение СТОП снято, ошибки сброшены!"
         } catch (e: Exception) {
             "Ошибка сброса: ${e.localizedMessage}"

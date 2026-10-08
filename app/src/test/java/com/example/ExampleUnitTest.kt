@@ -107,5 +107,40 @@ class ExampleUnitTest {
     assertNotNull(centerRaw)
     assertEquals(0.0f, centerRaw!!, 0.1f)
   }
+
+  @Test
+  fun testParseSteeringAngle_rejectsEchoesAndNegativeResponses() {
+    // Command echoes must be rejected to prevent false locking and freezes
+    assertNull(Elm327Manager.parseSteeringAngle("ATCRA 0CF01D13\rOK>"))
+    assertNull(Elm327Manager.parseSteeringAngle("ATMP F01D 1\rNO DATA>"))
+    assertNull(Elm327Manager.parseSteeringAngle("ATSH 18DA0BF1"))
+    assertNull(Elm327Manager.parseSteeringAngle("SEARCHING..."))
+    assertNull(Elm327Manager.parseSteeringAngle("UNABLE TO CONNECT"))
+
+    // UDS Negative Responses (NRC 7F ...) must be rejected
+    assertNull(Elm327Manager.parseSteeringAngle("7F 22 31"))
+    assertNull(Elm327Manager.parseSteeringAngle("7F 10 7E"))
+    assertNull(Elm327Manager.parseSteeringAngle("18DAF10B 03 7F 22 31"))
+  }
+
+  @Test
+  fun testIsEcuAliveResponse() {
+    // Positive responses
+    assertTrue(Elm327Manager.isEcuAliveResponse("50 01 00 32 01 F4"))
+    assertTrue(Elm327Manager.isEcuAliveResponse("7E 00"))
+    assertTrue(Elm327Manager.isEcuAliveResponse("62 01 0A 7D 00"))
+    assertTrue(Elm327Manager.isEcuAliveResponse("43 00"))
+    assertTrue(Elm327Manager.isEcuAliveResponse("59 02 FF"))
+
+    // Negative response proves ECU hardware is alive on the CAN bus
+    assertTrue(Elm327Manager.isEcuAliveResponse("7F 10 7E"))
+    assertTrue(Elm327Manager.isEcuAliveResponse("7F 22 31"))
+
+    // Non-alive responses
+    assertFalse(Elm327Manager.isEcuAliveResponse("NO DATA"))
+    assertFalse(Elm327Manager.isEcuAliveResponse("CAN ERROR"))
+    assertFalse(Elm327Manager.isEcuAliveResponse("UNABLE TO CONNECT"))
+    assertFalse(Elm327Manager.isEcuAliveResponse("?"))
+  }
 }
 
