@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -110,6 +111,8 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     private var dpfJob: Job? = null
     private var diagnosticJob: Job? = null
     private var scanJob: Job? = null
+    private var sasJob: Job? = null
+    private var calibrationJob: Job? = null
 
     init {
         refreshPairedDevices()
@@ -194,6 +197,14 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     fun disconnect() {
         diagnosticJob?.cancel()
         scanJob?.cancel()
+        sasJob?.cancel()
+        calibrationJob?.cancel()
+        dpfJob?.cancel()
+        diagnosticJob = null
+        scanJob = null
+        sasJob = null
+        calibrationJob = null
+        dpfJob = null
         elmManager.disconnect()
         _activeFaults.value = emptyList()
         _hasScannedRealTruck.value = false
@@ -259,18 +270,28 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     fun clearAllFaultCodes() {
         viewModelScope.launch {
             _isScanning.value = true
-            _statusNotice.value = "Отправка команд сброса DTC во все блоки Sitrak (04 / 14 FF FF FF)..."
+            _statusNotice.value = "Отправка команд сброса DTC во все блоки Sitrak (14 FF FF FF / DM11)..."
             val success = elmManager.clearAllModuleFaults()
-            delay(600)
-            _activeFaults.value = emptyList()
-            _isScanning.value = false
-            _statusNotice.value = if (success) {
-                "Коды неисправностей успешно сброшены во всех блоках Sitrak!"
+            delay(500)
+            if (isSimulationMode.value) {
+                _activeFaults.value = emptyList()
+                _isScanning.value = false
+                _statusNotice.value = "Коды неисправностей успешно сброшены (симулятор)!"
+                elmManager.diagnoseAllEcus()
             } else {
-                "Команда сброса отправлена (при активной неисправности код запишется повторно)"
+                val remaining = elmManager.scanAllModuleFaults()
+                _activeFaults.value = remaining
+                _hasScannedRealTruck.value = true
+                _isScanning.value = false
+                _statusNotice.value = when {
+                    success && remaining.isEmpty() ->
+                        "Коды неисправностей успешно сброшены во всех блоках Sitrak!"
+                    success && remaining.isNotEmpty() ->
+                        "Команда сброса принята, но активных ошибок осталось: ${remaining.size} (неисправность присутствует физически)"
+                    else ->
+                        "Блоки не подтвердили сброс ошибок. Проверьте зажигание (Кл. 15 ON, двигатель заглушен)."
+                }
             }
-            // Refresh ECU status
-            elmManager.diagnoseAllEcus()
         }
     }
 
@@ -367,29 +388,35 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
 
     // Steering Angle Sensor (SAS / WABCO EBS ESP) Calibration APIs
     fun calibrateSteeringZero() {
-        viewModelScope.launch {
+        calibrationJob?.cancel()
+        calibrationJob = viewModelScope.launch {
             _isCalibratingSteering.value = true
             _statusNotice.value = "Запуск калибровки нуля датчика угла руля (UDS Routine 31 01 02 01 -> WABCO EBS)..."
-            val result = elmManager.calibrateSteeringAngleZero()
-            _isCalibratingSteering.value = false
+            val result = try {
+                elmManager.calibrateSteeringAngleZero()
+            } finally {
+                _isCalibratingSteering.value = false
+            }
 
-            when (result) {
-                is CalibrationResult.Success -> {
-                    _statusNotice.value = result.message
-                }
-                is CalibrationResult.SecurityLocked -> {
-                    _calibrationDialogMessage.value = result.message
-                    _statusNotice.value = "Блок EBS отклонил калибровку: требуется Security Access"
-                }
-                is CalibrationResult.ConditionsNotMet -> {
-                    _calibrationDialogMessage.value = result.message
-                    _statusNotice.value = "Условия не выполнены: поставьте руль прямо и затяните ручник."
-                }
-                is CalibrationResult.NoResponse -> {
-                    _statusNotice.value = result.message
-                }
-                is CalibrationResult.Error -> {
-                    _statusNotice.value = result.message
+            if (isActive) {
+                when (result) {
+                    is CalibrationResult.Success -> {
+                        _statusNotice.value = result.message
+                    }
+                    is CalibrationResult.SecurityLocked -> {
+                        _calibrationDialogMessage.value = result.message
+                        _statusNotice.value = "Блок EBS отклонил калибровку: требуется Security Access"
+                    }
+                    is CalibrationResult.ConditionsNotMet -> {
+                        _calibrationDialogMessage.value = result.message
+                        _statusNotice.value = "Условия не выполнены: поставьте руль прямо и затяните ручник."
+                    }
+                    is CalibrationResult.NoResponse -> {
+                        _statusNotice.value = result.message
+                    }
+                    is CalibrationResult.Error -> {
+                        _statusNotice.value = result.message
+                    }
                 }
             }
         }
@@ -419,10 +446,13 @@ class SitrakDiagnosticViewModel(application: Application) : AndroidViewModel(app
     }
 
     fun scanAndLockSteeringSensor() {
-        viewModelScope.launch {
+        sasJob?.cancel()
+        sasJob = viewModelScope.launch {
             _statusNotice.value = "Поиск активного канала датчика угла руля SAS в шине CAN..."
             val result = elmManager.probeAndLockSteeringAngleSensor()
-            _statusNotice.value = result
+            if (isActive) {
+                _statusNotice.value = result
+            }
         }
     }
 

@@ -167,9 +167,10 @@ fun DtcScreen(
                         Text("Опросить CAN", color = Color.Black, fontWeight = FontWeight.Bold)
                     }
 
+                    val canTriggerClear = !isScanning && (faults.isNotEmpty() || isCanConnected)
                     OutlinedButton(
                         onClick = { showClearConfirmation = true },
-                        enabled = !isScanning && faults.isNotEmpty(),
+                        enabled = canTriggerClear,
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier
                             .weight(1f)
@@ -178,12 +179,12 @@ fun DtcScreen(
                         Icon(
                             imageVector = Icons.Default.ClearAll,
                             contentDescription = "Clear",
-                            tint = if (faults.isNotEmpty()) GaugeRed else TextMuted
+                            tint = if (canTriggerClear) GaugeRed else TextMuted
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             "Сбросить",
-                            color = if (faults.isNotEmpty()) GaugeRed else TextMuted
+                            color = if (canTriggerClear) GaugeRed else TextMuted
                         )
                     }
                 }

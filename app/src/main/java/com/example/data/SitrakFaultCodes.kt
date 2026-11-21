@@ -219,81 +219,325 @@ object SitrakFaultCodes {
         )
     )
 
-    fun matchOrSynthesizeCode(codeStr: String, module: TruckModule): DtcCode {
+    fun matchOrSynthesizeCode(codeStr: String, module: TruckModule, extraInfo: String? = null): DtcCode {
         val clean = codeStr.trim().uppercase(java.util.Locale.ROOT)
         val found = allKnownSitrakCodes.firstOrNull {
             it.obdCode.equals(clean, ignoreCase = true) ||
-            it.spnFmi.contains(clean, ignoreCase = true)
+            it.spnFmi.equals(clean, ignoreCase = true)
         }
-        if (found != null) return found.copy(isActive = true)
+        if (found != null) return found.copy(
+            id = "DTC_${module.code}_${found.obdCode}",
+            module = module,
+            isActive = true
+        )
 
+        val isSpn = clean.startsWith("SPN ")
         val prefix = when {
+            isSpn -> clean
             clean.startsWith("P") || clean.startsWith("C") || clean.startsWith("B") || clean.startsWith("U") -> clean
             else -> "P$clean"
         }
 
+        val infoSuffix = if (!extraInfo.isNullOrBlank()) " ($extraInfo)" else ""
         return DtcCode(
-            id = "DTC_${System.currentTimeMillis()}_$clean",
-            spnFmi = "Код $prefix",
+            id = "DTC_${module.code}_${prefix.replace(" ", "_")}",
+            spnFmi = if (isSpn) prefix else "Код $prefix",
             obdCode = prefix,
             module = module,
-            title = "Код неисправности $prefix (${module.displayName})",
-            description = "Зафиксирован код ошибки в блоке ${module.displayName}. Считан по шине CAN Sitrak.",
+            title = "Код неисправности $prefix (${module.code})$infoSuffix",
+            description = "Зафиксирован активный код ошибки в блоке ${module.displayName}$infoSuffix. Считан по диагностической шине CAN Sitrak.",
             probableCauses = listOf(
                 "Недостоверный сигнал датчика или исполнительного механизма",
-                "Обрыв или замыкание сигнальной цепи в жгуте проводки",
-                "Потеря согласования блоков по цифровой шине CAN J1939"
+                "Обрыв, окисление контактов или замыкание сигнальной цепи",
+                "Нарушение калибровки или потеря обмена по шине CAN"
             ),
-            severity = if (prefix.startsWith("P02") || prefix.startsWith("P00") || prefix.startsWith("P20")) DtcSeverity.CRITICAL else DtcSeverity.WARNING,
+            severity = if (prefix.startsWith("P02") || prefix.startsWith("P00") || prefix.startsWith("P20") || module == TruckModule.EBS) {
+                DtcSeverity.CRITICAL
+            } else {
+                DtcSeverity.WARNING
+            },
             isActive = true
         )
     }
 
     /**
-     * Parses standard OBD Mode 03, UDS 19 02 or J1939 responses into DtcCode list.
+     * Parses standard OBD Mode 03 (43), KWP2000 (58), UDS 19 02/0A (59) responses into DtcCode list.
      */
     fun parseDtcResponse(raw: String, module: TruckModule): List<DtcCode> {
-        val clean = raw.replace(">", "").replace("\r", " ").replace("\n", " ").trim()
-        if (clean.isEmpty() || clean.contains("NO DATA") || clean.contains("ERROR") || clean == "43 00") {
+        val clean = raw.replace(">", " ").replace("\r", "\n").trim()
+        if (clean.isEmpty() || clean.contains("NO DATA", ignoreCase = true) ||
+            clean.contains("UNABLE TO CONNECT", ignoreCase = true) ||
+            clean.contains("CAN ERROR", ignoreCase = true) ||
+            clean.contains("?", ignoreCase = true)
+        ) {
             return emptyList()
         }
 
-        val results = mutableListOf<DtcCode>()
-        val hexTokens = clean.split(Regex("""\s+""")).filter { it.length == 2 && it.matches(Regex("[0-9A-Fa-f]{2}")) }
+        // Remove ISO-TP multi-frame line prefixes like "0:", "1:", "2:" and standalone length headers like "00E"
+        val normalizedLines = clean.lines().mapNotNull { line ->
+            val trimmed = line.trim()
+            if (trimmed.isEmpty() || trimmed.contains("SEARCHING", ignoreCase = true) ||
+                trimmed.contains("STOPPED", ignoreCase = true) || trimmed.equals("OK", ignoreCase = true)
+            ) {
+                null
+            } else {
+                val withoutFrameIdx = trimmed.replace(Regex("""^[0-9A-Fa-f]{1,2}:\s*"""), "")
+                // Skip standalone 3-hex-char ISO-TP total length lines (e.g. "00E", "014")
+                if (withoutFrameIdx.matches(Regex("""^[0-9A-Fa-f]{3}$"""))) null else withoutFrameIdx
+            }
+        }
 
-        // Check if Mode 03 response (starts with 43)
+        val joined = normalizedLines.joinToString(" ")
+        val hexTokens = joined.split(Regex("""\s+""")).filter {
+            it.length == 2 && it.matches(Regex("[0-9A-Fa-f]{2}"))
+        }
+        if (hexTokens.isEmpty()) return emptyList()
+
+        val results = mutableListOf<DtcCode>()
+
+        // 1. Check UDS 19 02 / 19 0A response: 59 [02|0A] [AvailMask] [B1] [B2] [FTB] [Status] (4 bytes per DTC!)
+        val idx59 = hexTokens.indexOfFirst { it.equals("59", ignoreCase = true) }
+        if (idx59 != -1 && idx59 + 2 < hexTokens.size) {
+            val subFunc = hexTokens[idx59 + 1].uppercase(java.util.Locale.ROOT)
+            if (subFunc == "02" || subFunc == "0A" || subFunc == "04" || subFunc == "06") {
+                var i = idx59 + 3 // skip 59, subfunction, availability mask
+                while (i + 3 < hexTokens.size) {
+                    val b1 = hexTokens[i].uppercase(java.util.Locale.ROOT)
+                    val b2 = hexTokens[i + 1].uppercase(java.util.Locale.ROOT)
+                    val b3 = hexTokens[i + 2].uppercase(java.util.Locale.ROOT) // FTB
+                    val status = hexTokens[i + 3].uppercase(java.util.Locale.ROOT)
+                    val isPadding = (b1 == "00" && b2 == "00" && b3 == "00") || (b1 == "FF" && b2 == "FF")
+                    if (!isPadding) {
+                        val codeStr = parseObdDtc(b1, b2)
+                        val extra = "UDS $b1$b2-$b3, статус 0x$status"
+                        val dtc = matchOrSynthesizeCode(codeStr, module, extra)
+                        if (results.none { it.obdCode == dtc.obdCode && it.module == dtc.module }) {
+                            results.add(dtc)
+                        }
+                    }
+                    i += 4
+                }
+                if (results.isNotEmpty()) return results
+            }
+        }
+
+        // 2. Check KWP2000 18 00 FF 00 / 18 02 FF 00 response: 58 [Count] [B1] [B2] [Status] (3 bytes per DTC)
+        val idx58 = hexTokens.indexOfFirst { it.equals("58", ignoreCase = true) }
+        if (idx58 != -1 && idx58 + 1 < hexTokens.size) {
+            val count = hexTokens[idx58 + 1].toIntOrNull(16) ?: 0
+            if (count > 0) {
+                var i = idx58 + 2
+                var parsed = 0
+                while (i + 2 < hexTokens.size && parsed < count) {
+                    val b1 = hexTokens[i].uppercase(java.util.Locale.ROOT)
+                    val b2 = hexTokens[i + 1].uppercase(java.util.Locale.ROOT)
+                    val status = hexTokens[i + 2].uppercase(java.util.Locale.ROOT)
+                    if (b1 != "00" || b2 != "00") {
+                        val codeStr = parseObdDtc(b1, b2)
+                        val dtc = matchOrSynthesizeCode(codeStr, module, "KWP $b1$b2, статус 0x$status")
+                        if (results.none { it.obdCode == dtc.obdCode && it.module == dtc.module }) {
+                            results.add(dtc)
+                        }
+                    }
+                    i += 3
+                    parsed++
+                }
+                if (results.isNotEmpty()) return results
+            }
+        }
+
+        // 3. Check OBD Mode 03 response (43 [count?] [B1] [B2] ...)
         val idx43 = hexTokens.indexOfFirst { it.equals("43", ignoreCase = true) }
         if (idx43 != -1 && idx43 + 2 < hexTokens.size) {
-            // Usually: 43 [count] [byte1] [byte2] ...
-            var i = idx43 + 2
+            val remaining = hexTokens.size - (idx43 + 1)
+            // ISO 15765-4 uses 43 [count] [b1 b2]..., legacy uses 43 [b1 b2]...
+            val firstAfter43 = hexTokens[idx43 + 1].toIntOrNull(16) ?: -1
+            val hasCountByte = (remaining % 2 == 1) || (firstAfter43 in 1..20 && remaining >= 1 + firstAfter43 * 2)
+            var i = if (hasCountByte) idx43 + 2 else idx43 + 1
             while (i + 1 < hexTokens.size) {
-                val b1 = hexTokens[i]
-                val b2 = hexTokens[i + 1]
+                val b1 = hexTokens[i].uppercase(java.util.Locale.ROOT)
+                val b2 = hexTokens[i + 1].uppercase(java.util.Locale.ROOT)
                 if (b1 != "00" || b2 != "00") {
                     val codeStr = parseObdDtc(b1, b2)
-                    results.add(matchOrSynthesizeCode(codeStr, module))
+                    val dtc = matchOrSynthesizeCode(codeStr, module)
+                    if (results.none { it.obdCode == dtc.obdCode && it.module == dtc.module }) {
+                        results.add(dtc)
+                    }
                 }
                 i += 2
             }
         }
 
-        // Check if UDS 19 02 response (starts with 59 02)
-        val idx59 = hexTokens.indexOfFirst { it.equals("59", ignoreCase = true) }
-        if (idx59 != -1 && idx59 + 3 < hexTokens.size) {
-            var i = idx59 + 3 // skip 59, subfunction, availability mask
-            while (i + 2 < hexTokens.size) {
-                val b1 = hexTokens[i]
-                val b2 = hexTokens[i + 1]
-                // i+2 is failure type / status
-                if (b1 != "00" || b2 != "00") {
-                    val codeStr = parseObdDtc(b1, b2)
-                    results.add(matchOrSynthesizeCode(codeStr, module))
+        return results
+    }
+
+    /**
+     * Parses SAE J1939 DM1 (PGN FECA) and DM2 (PGN FECB) responses (both ATSPA reassembled and raw CAN TP BAM frames).
+     */
+    fun parseJ1939DmResponse(raw: String, fallbackModule: TruckModule = TruckModule.ECM): List<DtcCode> {
+        val clean = raw.replace(">", "\n").replace("\r", "\n").trim()
+        if (clean.isEmpty()) return emptyList()
+
+        val results = mutableListOf<DtcCode>()
+        val bamBuffers = mutableMapOf<Int, MutableList<Int>>() // SA -> reassembled DM payload bytes
+
+        val lines = clean.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        var currentHeaderSa: Int? = null
+        var currentIsDm = false
+
+        for (line in lines) {
+            val upper = line.uppercase(java.util.Locale.ROOT)
+            if (upper.contains("NO DATA") || upper.contains("SEARCHING") || upper.contains("STOPPED") ||
+                upper.contains("ERROR") || upper == "OK" || upper.contains("?")
+            ) {
+                continue
+            }
+
+            // Case A: Reassembled ATSPA multi-line block header e.g. "18 FECA 0B" or "18FECA0B"
+            val hdrOnlyMatch = Regex("""^([0-9A-F]{2})\s*(FE(?:CA|CB))\s*([0-9A-F]{2})$""").find(upper)
+            if (hdrOnlyMatch != null) {
+                currentHeaderSa = hdrOnlyMatch.groupValues[3].toIntOrNull(16)
+                currentIsDm = true
+                bamBuffers.getOrPut(currentHeaderSa!!) { mutableListOf() }.clear()
+                continue
+            }
+
+            // Skip standalone 3-char multi-packet byte count line (e.g. "00E") without breaking DM state
+            if (currentIsDm && upper.matches(Regex("""^[0-9A-F]{3}$"""))) {
+                continue
+            }
+
+            // Case B: Multi-line frame payload line "0: 04 FF 66 00 03 01 ..."
+            val frameLineMatch = Regex("""^[0-9A-F]{1,2}:\s*(.+)$""").find(upper)
+            if (frameLineMatch != null && currentIsDm && currentHeaderSa != null) {
+                val bytes = frameLineMatch.groupValues[1].trim().split(Regex("""\s+"""))
+                    .mapNotNull { if (it.length == 2) it.toIntOrNull(16) else null }
+                bamBuffers.getOrPut(currentHeaderSa!!) { mutableListOf() }.addAll(bytes)
+                continue
+            }
+
+            // Case C: Full CAN frame on one line:
+            //   1) "18FECA0B 04 FF ..." (8-char header)
+            //   2) "18 FECA 0B 04 FF ..." (2-4-2 ELM ATSPA header)
+            //   3) "18 FE CA 0B 04 FF ..." (2-2-2-2 raw CAN header)
+            val tokens = upper.split(Regex("""\s+"""))
+            val mergedHeaderMatch = Regex("""^([0-9A-F]{2})([0-9A-F]{4})([0-9A-F]{2})$""").find(tokens.firstOrNull() ?: "")
+            val (pgnHex, saInt, dataBytes) = if (mergedHeaderMatch != null) {
+                val pgn = mergedHeaderMatch.groupValues[2]
+                val sa = mergedHeaderMatch.groupValues[3].toIntOrNull(16) ?: continue
+                val data = tokens.drop(1).mapNotNull { if (it.length == 2) it.toIntOrNull(16) else null }
+                Triple(pgn, sa, data)
+            } else if (tokens.size >= 5 && tokens[0].length == 2 && tokens[1].length == 4 && tokens[2].length == 2) {
+                val pgn = tokens[1]
+                val sa = tokens[2].toIntOrNull(16) ?: continue
+                val data = tokens.drop(3).mapNotNull { if (it.length == 2) it.toIntOrNull(16) else null }
+                Triple(pgn, sa, data)
+            } else if (tokens.size >= 6 && tokens[0].length == 2 && tokens[1].length == 2 && tokens[2].length == 2 && tokens[3].length == 2) {
+                val pgn = tokens[1] + tokens[2]
+                val sa = tokens[3].toIntOrNull(16) ?: continue
+                val data = tokens.drop(4).mapNotNull { if (it.length == 2) it.toIntOrNull(16) else null }
+                Triple(pgn, sa, data)
+            } else {
+                currentIsDm = false
+                continue
+            }
+
+            currentIsDm = false
+            when (pgnHex) {
+                "FECA", "FECB" -> {
+                    decodeJ1939DmPayload(dataBytes, mapJ1939SaToModule(saInt, fallbackModule), results)
                 }
-                i += 3
+                "ECFF" -> {
+                    // BAM announce: byte0=0x20, byte5..7 = PGN LSB..MSB (CA FE 00 for FECA, CB FE 00 for FECB)
+                    if (dataBytes.size >= 8 && dataBytes[0] == 0x20 &&
+                        (dataBytes[5] == 0xCA || dataBytes[5] == 0xCB) && dataBytes[6] == 0xFE
+                    ) {
+                        bamBuffers[saInt] = mutableListOf()
+                    }
+                }
+                "EBFF" -> {
+                    // TP.DT packet: byte0 = sequence number (1..255), bytes 1..7 = payload
+                    val buf = bamBuffers[saInt]
+                    if (buf != null && dataBytes.size >= 2) {
+                        buf.addAll(dataBytes.drop(1))
+                    }
+                }
+            }
+        }
+
+        for ((saInt, payload) in bamBuffers) {
+            if (payload.size >= 6) {
+                decodeJ1939DmPayload(payload, mapJ1939SaToModule(saInt, fallbackModule), results)
             }
         }
 
         return results
+    }
+
+    private fun decodeJ1939DmPayload(bytes: List<Int>, module: TruckModule, out: MutableList<DtcCode>) {
+        // DM1/DM2: Byte 0 = Lamp Status, Byte 1 = Flash Status, then 4-byte DTC blocks
+        if (bytes.size < 6) return
+        var i = 2
+        while (i + 3 < bytes.size) {
+            val b0 = bytes[i]
+            val b1 = bytes[i + 1]
+            val b2 = bytes[i + 2]
+            val b3 = bytes[i + 3]
+
+            // Skip empty / NA slots (00 00 00 00 or FF FF FF FF)
+            val allZero = b0 == 0 && b1 == 0 && b2 == 0 && b3 == 0
+            val allFf = b0 == 0xFF && b1 == 0xFF && b2 == 0xFF && b3 == 0xFF
+            if (!allZero && !allFf) {
+                val spn = b0 or (b1 shl 8) or ((b2 and 0xE0) shl 11)
+                val fmi = b2 and 0x1F
+                val oc = b3 and 0x7F
+                if (spn in 1..524286) {
+                    val spnStr = "SPN $spn FMI $fmi"
+                    val fmiDesc = describeFmi(fmi)
+                    val dtc = matchOrSynthesizeCode(spnStr, module, "$fmiDesc, повт.: $oc")
+                    if (out.none { it.spnFmi == dtc.spnFmi && it.module == dtc.module }) {
+                        out.add(dtc)
+                    }
+                }
+            }
+            i += 4
+        }
+    }
+
+    private fun mapJ1939SaToModule(sa: Int, fallback: TruckModule): TruckModule {
+        return when (sa) {
+            0x00 -> TruckModule.ECM
+            0x03 -> TruckModule.TCU
+            0x0B -> TruckModule.EBS
+            0x3D, 0x55 -> TruckModule.SCR
+            0x21, 0x27, 0x17 -> TruckModule.CBCU
+            else -> fallback
+        }
+    }
+
+    private fun describeFmi(fmi: Int): String = when (fmi) {
+        0 -> "Данные выше нормы (крит.)"
+        1 -> "Данные ниже нормы (крит.)"
+        2 -> "Недостоверный / прерывистый сигнал"
+        3 -> "Замыкание на +24В / высокое напряжение"
+        4 -> "Замыкание на массу / низкое напряжение"
+        5 -> "Обрыв цепи / высокий импеданс"
+        6 -> "Повышенный ток / КЗ на массу"
+        7 -> "Механическая неисправность"
+        8 -> "Нарушение частоты / ШИМ"
+        9 -> "Таймаут обмена по шине CAN"
+        10 -> "Аномальное изменение сигнала"
+        11 -> "Неизвестная причина неисправности"
+        12 -> "Внутренний дефект блока / датчика"
+        13 -> "Требуется калибровка (вне диапазона)"
+        14 -> "Специальные условия неисправности"
+        15 -> "Превышение верхнего предела (предупр.)"
+        16 -> "Умеренное превышение верхнего порога"
+        17 -> "Снижение ниже нижнего порога"
+        18 -> "Умеренное снижение ниже порога"
+        19 -> "Получены ошибочные данные по CAN"
+        31 -> "Состояние ошибки активно"
+        else -> "FMI $fmi"
     }
 
     private fun parseObdDtc(b1Hex: String, b2Hex: String): String {
