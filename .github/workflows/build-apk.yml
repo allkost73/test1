@@ -21,12 +21,12 @@ on:
 
 permissions:
   contents: write
-  actions: write
+  actions: read
   packages: write
 
 env:
-  GRADLE_OPTS: "-Dorg.gradle.jvmargs=\"-Xmx4096m -XX:MaxMetaspaceSize=1024m -XX:+HeapDumpOnOutOfMemoryError\" -Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
-  JAVA_OPTS: "-Xmx4096m"
+  JAVA_OPTS: "-Xmx512m"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
 
 jobs:
   build:
@@ -46,52 +46,45 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Android SDK and Licenses
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36.1 & Accept Licenses
         run: |
-          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
-          
-          # Pre-accept licenses in standard paths
-          mkdir -p "$ANDROID_HOME/licenses" 2>/dev/null || true
-          mkdir -p "$HOME/.android/licenses" 2>/dev/null || true
-          
-          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" | tee -a "$ANDROID_HOME/licenses/android-sdk-license" "$HOME/.android/licenses/android-sdk-license" >/dev/null 2>&1 || true
-          echo "d56f5187479451eabf01fb78af6dfcb131a6481e" | tee -a "$ANDROID_HOME/licenses/android-sdk-license" "$HOME/.android/licenses/android-sdk-license" >/dev/null 2>&1 || true
-          echo "84831b9409646a33ee440757b8e0e914910183ac" | tee -a "$ANDROID_HOME/licenses/android-sdk-preview-license" "$HOME/.android/licenses/android-sdk-preview-license" >/dev/null 2>&1 || true
-          
-          # Accept licenses using sdkmanager if available
-          if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
-            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses 2>/dev/null || true
-            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36.1" "platform-tools" "build-tools;36.0.0" 2>/dev/null || true
-          elif which sdkmanager >/dev/null 2>&1; then
-            yes | sdkmanager --licenses 2>/dev/null || true
-            sdkmanager "platforms;android-36.1" "platform-tools" "build-tools;36.0.0" 2>/dev/null || true
-          fi
+          ANDROID_SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          echo "Using ANDROID_SDK=$ANDROID_SDK"
+          mkdir -p "$ANDROID_SDK/licenses" "$HOME/.android/licenses"
+
+          printf '\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n' | tee -a "$ANDROID_SDK/licenses/android-sdk-license" "$HOME/.android/licenses/android-sdk-license" >/dev/null
+          printf '\n84831b9409646a33ee440757b8e0e914910183ac\n' | tee -a "$ANDROID_SDK/licenses/android-sdk-preview-license" "$HOME/.android/licenses/android-sdk-preview-license" >/dev/null
+
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-36.1" "build-tools;36.0.0"
 
       - name: Prepare Build Environment
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
         run: |
-          chmod +x ./gradlew || true
-          
-          # Prepare .env so secrets-gradle-plugin never fails
+          chmod +x ./gradlew
+
           if [ ! -f ".env" ]; then
             if [ -f ".env.example" ]; then
               cp .env.example .env
             else
               touch .env
             fi
-            echo ".env file initialized."
           fi
 
-          # Prepare debug.keystore from base64 if available
-          if [ ! -f "debug.keystore" ]; then
-            if [ -f "debug.keystore.base64" ]; then
-              (base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null) || (base64 --decode debug.keystore.base64 > debug.keystore 2>/dev/null) || true
-            fi
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
           fi
-          
-          # Generate fallback debug.keystore if still absent
+
+          if [ ! -f "debug.keystore" ] && [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore || base64 --decode debug.keystore.base64 > debug.keystore
+          fi
+
           if [ ! -s "debug.keystore" ]; then
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || true
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: Setup Gradle
@@ -100,35 +93,67 @@ jobs:
           cache-read-only: false
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_type == 'debug' || inputs.build_type == 'both' }}
+        run: |
+          ./gradlew :app:assembleDebug \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
 
       - name: Build Release APK
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_type == 'release' || inputs.build_type == 'both' }}
         continue-on-error: true
+        env:
+          STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
-          ./gradlew assembleRelease --no-daemon --stacktrace || echo "Release build warning, debug APK will be packaged."
+          ./gradlew :app:assembleRelease \
+            --no-daemon \
+            --max-workers=2 \
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
 
       - name: Collect APK Files
+        if: always()
         run: |
           mkdir -p build-apks
-          # Copy any generated APK files
-          find app/build/outputs/apk -name "*.apk" -exec cp {} build-apks/ \; 2>/dev/null || true
-          
           if [ -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
-            cp app/build/outputs/apk/debug/app-debug.apk build-apks/SitrakS7H-debug.apk 2>/dev/null || true
+            cp app/build/outputs/apk/debug/app-debug.apk build-apks/SitrakS7H-debug.apk
           fi
           if [ -f "app/build/outputs/apk/release/app-release.apk" ]; then
-            cp app/build/outputs/apk/release/app-release.apk build-apks/SitrakS7H-release.apk 2>/dev/null || true
+            cp app/build/outputs/apk/release/app-release.apk build-apks/SitrakS7H-release.apk
           fi
-          
+
+          # Fallback: grab any other *.apk if non-standard variant output name exists
+          if [ -z "$(ls -A build-apks 2>/dev/null)" ]; then
+            find app/build/outputs/apk -name "*.apk" -exec cp {} build-apks/ \; 2>/dev/null || true
+          fi
+
           echo "Collected APK files:"
-          ls -lh build-apks/
+          ls -lh build-apks/ || true
+
+          if [ -n "$(ls -A build-apks 2>/dev/null)" ]; then
+            {
+              echo "### 📦 Собранные APK файлы Sitrak S7H"
+              echo ""
+              for f in build-apks/*.apk; do
+                echo "- \`$(basename "$f")\` ($(du -h "$f" | cut -f1))"
+              done
+              echo ""
+              echo "Скачать архив **\`SitrakS7H-APKs\`** можно ниже в разделе **Artifacts**."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::APK files were not generated in app/build/outputs/apk"
+            exit 1
+          fi
 
       - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: SitrakS7H-APKs
           path: build-apks/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 
       - name: Publish GitHub Release
