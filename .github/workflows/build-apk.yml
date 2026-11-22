@@ -135,6 +135,7 @@ jobs:
             -Dorg.gradle.jvmargs="-Xmx3072m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
 
       - name: Collect APK Files
+        id: collect_apks
         if: always()
         run: |
           mkdir -p build-apks
@@ -160,7 +161,7 @@ jobs:
                 echo "- \`$(basename "$f")\` ($(du -h "$f" | cut -f1))"
               done
               echo ""
-              echo "Скачать архив **\`SitrakS7H-APKs\`** можно ниже в разделе **Artifacts**."
+              echo "Скачать архив **\`SitrakS7H-APKs\`** можно ниже в разделе **Artifacts** (необходим вход в аккаунт GitHub в браузере) или готовые `.apk` в разделе **Releases**."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::error::APK files were not generated in app/build/outputs/apk"
@@ -168,6 +169,7 @@ jobs:
           fi
 
       - name: Upload APK Artifacts
+        if: always() && steps.collect_apks.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: SitrakS7H-APKs
@@ -175,8 +177,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Publish Latest APK Release
+        if: always() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && steps.collect_apks.outcome == 'success'
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: latest-apk
+          name: Latest APK Build
+          files: build-apks/*.apk
+          draft: false
+          prerelease: true
+          generate_release_notes: false
+
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: always() && startsWith(github.ref, 'refs/tags/') && steps.collect_apks.outcome == 'success'
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         env:
